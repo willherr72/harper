@@ -1,6 +1,7 @@
 //! Windows implementation of [`OsBroker`], backed by UI Automation.
 
 mod offsets;
+mod rects;
 
 use std::collections::BTreeMap;
 
