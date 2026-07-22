@@ -1,5 +1,7 @@
 //! Windows implementation of [`OsBroker`], backed by UI Automation.
 
+mod offsets;
+
 use std::collections::BTreeMap;
 
 use harper_core::linting::Lint;
