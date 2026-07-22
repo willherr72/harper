@@ -75,13 +75,13 @@ pub struct AppSearchResult {
 
 /// No-op platform broker for targets that do not have an OS implementation yet.
 ///
-/// This lets the highlighter compile on non-macOS platforms while making it explicit that there is
-/// currently no accessibility or cursor integration there.
-#[cfg(not(target_os = "macos"))]
+/// This lets the highlighter compile on platforms without a native broker while making it explicit
+/// that there is currently no accessibility or cursor integration there.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[derive(Default)]
 pub struct NoopBroker;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 impl OsBroker for NoopBroker {
     fn get_boxes(
         &mut self,
