@@ -185,8 +185,22 @@ pub fn run_tauri() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app, _event| {
+            // Harper lives in the system tray on Windows, so closing the last
+            // window (the settings window's X) must not quit the app.
+            // ExitRequested with `code: None` is that user-interaction exit;
+            // explicit quits — the tray's Quit item calls `app.exit(0)` — carry
+            // `Some(code)` and are allowed through.
+            #[cfg(target_os = "windows")]
+            if let tauri::RunEvent::ExitRequested {
+                code: None, api, ..
+            } = &_event
+            {
+                api.prevent_exit();
+            }
+        });
 }
 
 /// Run as a highlighter process.
