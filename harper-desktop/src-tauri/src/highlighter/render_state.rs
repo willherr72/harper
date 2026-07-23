@@ -147,19 +147,23 @@ impl RenderState {
 
     /// Draws highlights and the active popup from the same state used by hit-testing so visible
     /// regions and clickable regions do not drift apart.
-    pub fn render(&mut self, ui: &mut egui::Ui) {
+    pub fn render(&mut self, ui: &mut egui::Ui, transform: RectTransform) {
         for positioned_lint in &self.rects {
-            draw_highlight(ui, &positioned_lint.rect, &positioned_lint.lint);
+            draw_highlight(
+                ui,
+                transform.apply(&positioned_lint.rect),
+                &positioned_lint.lint,
+            );
         }
 
         if let Some(index) = self.highlighted_lint
             && let Some(positioned_lint) = self.rects.get(index)
         {
-            let rect = positioned_lint.rect;
+            let bounds = transform.apply(&positioned_lint.rect);
             let lint = positioned_lint.lint.clone();
             let source_text = positioned_lint.source_text.clone();
 
-            match render_lint_card(ui, &rect, &lint, &source_text, &mut self.markdown_cache) {
+            match render_lint_card(ui, bounds, &lint, &source_text, &mut self.markdown_cache) {
                 Some(LintCardAction::Close) => self.close_popup(),
                 Some(LintCardAction::ApplySuggestion(suggestion)) => {
                     if let Some(actionable_lint) = self.rects.get_mut(index) {
@@ -217,8 +221,7 @@ impl RenderState {
 }
 
 /// Draws the always-visible lint marker without making the renderer responsible for popup state.
-fn draw_highlight(ui: &mut egui::Ui, rect: &Rect, lint: &Lint) {
-    let rect_bounds = rect_bounds(rect);
+fn draw_highlight(ui: &mut egui::Ui, rect_bounds: egui::Rect, lint: &Lint) {
     let color = lint_color(lint);
     let [r, g, b, _] = color.to_array();
     let fill_color = egui::Color32::from_rgba_unmultiplied(r, g, b, 24);
@@ -239,12 +242,12 @@ fn draw_highlight(ui: &mut egui::Ui, rect: &Rect, lint: &Lint) {
 /// Renders the suggestion popup and returns whether the explicit close control was clicked.
 fn render_lint_card(
     ui: &mut egui::Ui,
-    rect: &Rect,
+    bounds: egui::Rect,
     lint: &Lint,
     source_text: &str,
     markdown_cache: &mut CommonMarkCache,
 ) -> Option<LintCardAction> {
-    let popup_rect = popup_rect_for_lint(rect);
+    let popup_rect = popup_rect_for_bounds(bounds);
 
     egui::Area::new(egui::Id::new("harper-lint-card"))
         .order(egui::Order::Foreground)
@@ -722,6 +725,58 @@ fn rect_bounds(rect: &Rect) -> egui::Rect {
     egui::Rect::from_min_size(
         egui::pos2(rect.x as f32, rect.y as f32),
         egui::vec2(rect.width as f32, rect.height as f32),
+    )
+}
+
+/// Maps a broker rectangle into window-local egui points for the window that is
+/// currently rendering.
+///
+/// Broker rectangles and the cursor share one global space (physical screen
+/// pixels on Windows, points elsewhere), which is what hit-testing compares in.
+/// Rendering, however, happens in each window's local egui points, so the draw
+/// path subtracts the window's origin and divides by its scale factor. macOS
+/// uses the identity transform, which reproduces the pre-existing 1:1 mapping
+/// exactly.
+#[derive(Clone, Copy)]
+pub struct RectTransform {
+    /// Window origin in the broker's coordinate space.
+    pub offset: egui::Vec2,
+    /// Window scale factor (points per pixel divisor).
+    pub scale: f32,
+}
+
+impl RectTransform {
+    /// The identity transform, used on platforms whose broker already reports
+    /// coordinates in the renderer's space (everything except Windows).
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    pub fn identity() -> Self {
+        Self {
+            offset: egui::Vec2::ZERO,
+            scale: 1.0,
+        }
+    }
+
+    fn apply(&self, rect: &Rect) -> egui::Rect {
+        egui::Rect::from_min_size(
+            egui::pos2(
+                (rect.x as f32 - self.offset.x) / self.scale,
+                (rect.y as f32 - self.offset.y) / self.scale,
+            ),
+            egui::vec2(
+                rect.width as f32 / self.scale,
+                rect.height as f32 / self.scale,
+            ),
+        )
+    }
+}
+
+/// Popup geometry relative to already-transformed lint bounds (window-local
+/// points), for the draw path. Mirrors `popup_rect_for_lint`, which stays in the
+/// global space used by hit-testing.
+fn popup_rect_for_bounds(bounds: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_size(
+        egui::pos2(bounds.min.x, bounds.max.y + CARD_OFFSET_Y),
+        egui::vec2(CARD_WIDTH, CARD_HEIGHT),
     )
 }
 
