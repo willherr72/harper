@@ -126,8 +126,17 @@ impl RenderState {
     ///
     /// Cursor polling lives outside the renderer, but hit-testing belongs next to the rectangles and
     /// popup geometry being rendered so both paths use the same layout contract.
-    pub fn hit_target_at_pos(&self, pos: egui::Pos2) -> HitTarget {
-        if self.popup_rect().is_some_and(|rect| rect.contains(pos)) {
+    ///
+    /// `popup_scale` is the display scale factor at the cursor. Lint rectangles already live in the
+    /// cursor's coordinate space, but the popup card is *drawn* in scaled points, so its on-screen
+    /// footprint is `CARD_WIDTH/HEIGHT × scale`. Hit-testing the unscaled size leaves the card's
+    /// lower portion click-through: those clicks fall into the app underneath — right on the
+    /// misspelled word — summoning the app's own spellcheck UI over ours.
+    pub fn hit_target_at_pos(&self, pos: egui::Pos2, popup_scale: f32) -> HitTarget {
+        if self
+            .popup_rect(popup_scale)
+            .is_some_and(|rect| rect.contains(pos))
+        {
             return HitTarget::Popup;
         }
 
@@ -139,10 +148,10 @@ impl RenderState {
 
     /// Computes popup hit-test bounds from our layout contract instead of waiting for egui to report
     /// rendered bounds, which keeps hit-testing available before the next render pass completes.
-    pub fn popup_rect(&self) -> Option<egui::Rect> {
+    pub fn popup_rect(&self, scale: f32) -> Option<egui::Rect> {
         self.highlighted_lint
             .and_then(|index| self.rects.get(index))
-            .map(|positioned_lint| popup_rect_for_lint(&positioned_lint.rect))
+            .map(|positioned_lint| popup_rect_for_lint(&positioned_lint.rect, scale))
     }
 
     /// Draws highlights and the active popup from the same state used by hit-testing so visible
@@ -160,6 +169,15 @@ impl RenderState {
             && let Some(positioned_lint) = self.rects.get(index)
         {
             let bounds = transform.apply(&positioned_lint.rect);
+
+            // Only the window that actually contains the lint draws its card.
+            // egui Areas clamp themselves into the visible screen, so without
+            // this gate the monitors whose transforms put the card off-screen
+            // drag it back into view and the popup appears on every display.
+            if !ui.ctx().content_rect().intersects(bounds) {
+                return;
+            }
+
             let lint = positioned_lint.lint.clone();
             let source_text = positioned_lint.source_text.clone();
 
@@ -782,13 +800,17 @@ fn popup_rect_for_bounds(bounds: egui::Rect) -> egui::Rect {
 
 /// Defines popup geometry ahead of rendering so the transparent overlay can enable or disable native
 /// hit-testing based on our intended layout, not a previous frame's measured egui output.
-fn popup_rect_for_lint(rect: &Rect) -> egui::Rect {
+///
+/// `scale` converts the card's point-denominated dimensions into the lint rectangle's coordinate
+/// space. It is the display scale factor on Windows (physical pixels) and 1.0 elsewhere, matching
+/// how the drawn card's footprint scales on screen.
+fn popup_rect_for_lint(rect: &Rect, scale: f32) -> egui::Rect {
     egui::Rect::from_min_size(
         egui::pos2(
             rect.x as f32,
-            rect.y as f32 + rect.height as f32 + CARD_OFFSET_Y,
+            rect.y as f32 + rect.height as f32 + CARD_OFFSET_Y * scale,
         ),
-        egui::vec2(CARD_WIDTH, CARD_HEIGHT),
+        egui::vec2(CARD_WIDTH * scale, CARD_HEIGHT * scale),
     )
 }
 

@@ -189,6 +189,16 @@ impl WindowManagerApp {
         (self.refresh_config)();
     }
 
+    /// Display scale used for popup hit-testing at a cursor position: the scale
+    /// of whichever overlay window contains it, or 1.0 when none does — which
+    /// also keeps non-Windows platforms at their existing unscaled behavior.
+    fn popup_scale_at(&self, pos: egui::Pos2) -> f32 {
+        self.windows
+            .iter()
+            .find_map(|window| window.popup_scale_at(pos))
+            .unwrap_or(1.0)
+    }
+
     /// Toggles native click-through behavior based on the cursor's current interactive Harper target,
     /// keeping editor clicks from being swallowed when the pointer is outside highlights and popups.
     fn update_cursor_hittest(&mut self, event_loop: &ActiveEventLoop) {
@@ -196,7 +206,8 @@ impl WindowManagerApp {
             return;
         };
 
-        let hit_target = self.render_state.hit_target_at_pos(cursor_pos);
+        let popup_scale = self.popup_scale_at(cursor_pos);
+        let hit_target = self.render_state.hit_target_at_pos(cursor_pos, popup_scale);
         self.hovered_lint = match hit_target {
             HitTarget::Lint(index) => Some(index),
             HitTarget::Popup | HitTarget::None => None,
@@ -226,7 +237,9 @@ impl WindowManagerApp {
             return;
         };
 
-        let HitTarget::Lint(index) = self.render_state.hit_target_at_pos(cursor_pos) else {
+        let popup_scale = self.popup_scale_at(cursor_pos);
+        let HitTarget::Lint(index) = self.render_state.hit_target_at_pos(cursor_pos, popup_scale)
+        else {
             return;
         };
 

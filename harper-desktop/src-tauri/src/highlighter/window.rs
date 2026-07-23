@@ -14,6 +14,35 @@ use winit::window::{Window as WinitWindow, WindowButtons, WindowId, WindowLevel}
 use super::Error;
 use super::render_state::{RectTransform, RenderState};
 
+/// Marks the overlay as never-activating via `WS_EX_NOACTIVATE`.
+///
+/// The overlay must receive clicks — highlight and popup interaction — without
+/// ever becoming the active window. Activation would pull the foreground away
+/// from the app being linted, which both drops that app out of the per-app
+/// allowlist and disturbs the focused text element mid-interaction: the lint
+/// popup vanished on the very click meant to open it. winit's
+/// `with_active(false)` only suppresses the initial activation, and winit
+/// rewrites `GWL_EXSTYLE` from its own flag cache on every cursor-hittest
+/// toggle, so this must be applied at creation *and* after every toggle.
+#[cfg(target_os = "windows")]
+fn apply_no_activate(window: &WinitWindow) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_NOACTIVATE,
+    };
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    if let Ok(handle) = window.window_handle()
+        && let RawWindowHandle::Win32(win32) = handle.as_raw()
+    {
+        let hwnd = HWND(win32.hwnd.get() as _);
+        unsafe {
+            let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE.0 as isize);
+        }
+    }
+}
+
 /// A transparent click-through overlay window for one monitor.
 ///
 /// `Window` owns the native winit window plus egui/wgpu integration required to render into it. It
@@ -53,10 +82,19 @@ impl Window {
         #[cfg(target_os = "windows")]
         let attributes = {
             use winit::platform::windows::WindowAttributesExtWindows;
-            attributes.with_no_redirection_bitmap(true)
+            attributes
+                .with_no_redirection_bitmap(true)
+                // The per-monitor overlays are not applications the user
+                // switches to; without this each shows up as a blank taskbar
+                // button. macOS avoids the equivalent via its Accessory
+                // activation policy.
+                .with_skip_taskbar(true)
         };
 
         let window = Arc::new(event_loop.create_window(attributes)?);
+
+        #[cfg(target_os = "windows")]
+        apply_no_activate(&window);
 
         window.set_outer_position(PhysicalPosition::new(position.x, position.y));
         let _ = window.request_inner_size(PhysicalSize::new(size.width, size.height));
@@ -134,6 +172,13 @@ impl Window {
     pub fn set_cursor_hittest(&self, enabled: bool) -> Result<(), Error> {
         self.inner.set_cursor_hittest(enabled)?;
 
+        // winit rebuilds the whole extended style from its internal flag cache
+        // on every hittest toggle, wiping externally applied bits — so the
+        // no-activate style must be re-asserted here or the first hover would
+        // silently remove it.
+        #[cfg(target_os = "windows")]
+        apply_no_activate(&self.inner);
+
         Ok(())
     }
 
@@ -151,6 +196,32 @@ impl Window {
             self.painter
                 .on_window_resized(self.viewport_id, width, height);
             self.inner.request_redraw();
+        }
+    }
+
+    /// Display scale for popup hit-testing when the cursor is over this window.
+    ///
+    /// Returns `None` when the position is outside the window. On non-Windows
+    /// platforms broker coordinates are already in points, so the scale is 1.0.
+    pub fn popup_scale_at(&self, pos: egui::Pos2) -> Option<f32> {
+        let origin = self.inner.outer_position().unwrap_or_default();
+        let size = self.inner.inner_size();
+        let inside = pos.x >= origin.x as f32
+            && pos.x < (origin.x + size.width as i32) as f32
+            && pos.y >= origin.y as f32
+            && pos.y < (origin.y + size.height as i32) as f32;
+
+        if !inside {
+            return None;
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            Some(self.inner.scale_factor() as f32)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Some(1.0)
         }
     }
 
