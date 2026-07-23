@@ -1,10 +1,13 @@
 //! Windows implementation of [`OsBroker`], backed by UI Automation.
 
+mod apply;
+mod foreground;
 mod offsets;
 mod rects;
 mod uia;
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use harper_core::linting::Lint;
 use windows::Win32::Foundation::POINT;
@@ -17,6 +20,7 @@ use windows::Win32::UI::Accessibility::{
 };
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
+use crate::config::Integration;
 use crate::os_broker::{AccessibilityPermissionStatus, OsBroker};
 use crate::rect::{ActionableLint, Rect};
 
@@ -49,14 +53,48 @@ thread_local! {
 ///
 /// Windows requires no equivalent of the macOS accessibility (TCC) grant, so
 /// permission is always reported as granted.
-#[derive(Default)]
-pub struct WindowsBroker;
+pub struct WindowsBroker {
+    /// Per-app allowlist, keyed by lowercase foreground executable name. The
+    /// highlighter's config refresh writes into this same shared Vec, so
+    /// settings toggles take effect without restarting the broker.
+    integrations: Arc<StdMutex<Vec<Integration>>>,
+}
+
+impl WindowsBroker {
+    pub fn new(integrations: Arc<StdMutex<Vec<Integration>>>) -> Self {
+        Self { integrations }
+    }
+}
+
+impl Default for WindowsBroker {
+    fn default() -> Self {
+        Self::new(Arc::new(StdMutex::new(Integration::curated_integrations())))
+    }
+}
 
 impl OsBroker for WindowsBroker {
     fn get_boxes(
         &mut self,
         lint_text: &mut dyn FnMut(&str) -> BTreeMap<String, Vec<Lint>>,
     ) -> Vec<ActionableLint> {
+        // Per-app allowlist, mirroring the macOS broker: apps the user has not
+        // enabled produce no highlights at all. Without this gate Harper lints
+        // every focused TextPattern — terminals and its own settings window
+        // included.
+        let Some(executable) = foreground::foreground_executable_name() else {
+            return Vec::new();
+        };
+        let integration_enabled = match self.integrations.lock() {
+            Ok(integrations) => Integration::is_integration_enabled_in(&integrations, &executable),
+            Err(error) => {
+                eprintln!("Unable to read integrations: {error}");
+                false
+            }
+        };
+        if !integration_enabled {
+            return Vec::new();
+        }
+
         let Some(pattern) = AUTOMATION.with(|a| a.as_ref().and_then(uia::focused_text_pattern))
         else {
             return Vec::new();
@@ -89,15 +127,27 @@ impl OsBroker for WindowsBroker {
                         continue;
                     };
 
+                    // Everything the apply closure needs, captured by value.
+                    // The COM range clone stays on this thread — the closure is
+                    // invoked from the same event loop that called get_boxes.
+                    let apply_range = range.clone();
+                    let apply_text = text.clone();
+                    let (span_start, span_end) = (lint.span.start, lint.span.end);
+
                     collected.push(ActionableLint::new(
                         rect,
                         rule_name.clone(),
                         lint,
                         text.clone(),
-                        // Click-to-apply is deliberately out of scope for the
-                        // initial Windows implementation; mutating the element
-                        // through UIA is its own project.
-                        |_suggestion| {},
+                        move |suggestion| {
+                            apply_suggestion_to_range(
+                                &apply_range,
+                                &apply_text,
+                                span_start,
+                                span_end,
+                                &suggestion,
+                            );
+                        },
                     ));
                 }
             }
@@ -115,14 +165,95 @@ impl OsBroker for WindowsBroker {
     fn accessibility_permission_status(&self) -> AccessibilityPermissionStatus {
         AccessibilityPermissionStatus::Granted
     }
+
+    fn system_integration_display_name(&self, bundle_id: &str) -> String {
+        // Friendly names for executables whose file names don't speak for
+        // themselves — olk.exe gives no hint that it is Outlook.
+        let known = match bundle_id {
+            "notepad.exe" => Some("Notepad"),
+            "olk.exe" => Some("Outlook (new)"),
+            "outlook.exe" => Some("Outlook (classic)"),
+            "ms-teams.exe" => Some("Microsoft Teams"),
+            "slack.exe" => Some("Slack"),
+            "discord.exe" => Some("Discord"),
+            "chrome.exe" => Some("Google Chrome"),
+            "msedge.exe" => Some("Microsoft Edge"),
+            "firefox.exe" => Some("Mozilla Firefox"),
+            "winword.exe" => Some("Microsoft Word"),
+            "excel.exe" => Some("Microsoft Excel"),
+            "powerpnt.exe" => Some("Microsoft PowerPoint"),
+            "onenote.exe" => Some("Microsoft OneNote"),
+            "code.exe" => Some("Visual Studio Code"),
+            "obsidian.exe" => Some("Obsidian"),
+            "windowsterminal.exe" | "wt.exe" => Some("Windows Terminal"),
+            _ => None,
+        };
+        if let Some(name) = known {
+            return name.to_string();
+        }
+
+        // Fall back to prettifying the file name: "some-app.exe" -> "Some App".
+        let stem = bundle_id.strip_suffix(".exe").unwrap_or(bundle_id);
+        let pretty = stem
+            .split(['-', '_', '.'])
+            .filter(|part| !part.is_empty())
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        if pretty.is_empty() {
+            bundle_id.to_string()
+        } else {
+            pretty
+        }
+    }
 }
 
-/// Builds a sub-range covering `[start, end)` UTF-16 units within `range` and
-/// returns its first usable bounding rectangle.
+/// Applies a suggestion by selecting the lint's sub-range and typing the
+/// replacement.
 ///
-/// A lint spanning a line wrap produces several rectangles; the first is used,
-/// matching the macOS broker's one-rectangle-per-lint model.
-fn span_rect(range: &IUIAutomationTextRange, start: i32, end: i32) -> Option<Rect> {
+/// The user's click never activated the overlay (`WS_EX_NOACTIVATE`), so the
+/// text field still has keyboard focus and synthesized input lands in it.
+fn apply_suggestion_to_range(
+    range: &IUIAutomationTextRange,
+    text: &str,
+    span_start: usize,
+    span_end: usize,
+    suggestion: &harper_core::linting::Suggestion,
+) {
+    let span = harper_core::Span::new(span_start, span_end);
+    let Some(replacement) = apply::replacement_for(text, span, suggestion) else {
+        eprintln!("suggestion no longer fits the captured text; not applying");
+        return;
+    };
+
+    let start = offsets::char_to_utf16_offset(text, span_start);
+    let end = offsets::char_to_utf16_offset(text, span_end);
+    let Some(sub) = sub_range(range, start, end) else {
+        eprintln!("could not rebuild the lint's text range; not applying");
+        return;
+    };
+
+    if let Err(error) = unsafe { sub.Select() } {
+        eprintln!("could not select the lint's text range: {error}");
+        return;
+    }
+
+    apply::send_replacement(&replacement);
+}
+
+/// Builds a sub-range covering `[start, end)` UTF-16 units within `range`.
+fn sub_range(
+    range: &IUIAutomationTextRange,
+    start: i32,
+    end: i32,
+) -> Option<IUIAutomationTextRange> {
     unsafe {
         let sub = range.Clone().ok()?;
 
@@ -143,6 +274,17 @@ fn span_rect(range: &IUIAutomationTextRange, start: i32, end: i32) -> Option<Rec
         sub.MoveEndpointByUnit(TextPatternRangeEndpoint_Start, TextUnit_Character, start)
             .ok()?;
 
+        Some(sub)
+    }
+}
+
+/// First usable bounding rectangle of the `[start, end)` sub-range.
+///
+/// A lint spanning a line wrap produces several rectangles; the first is used,
+/// matching the macOS broker's one-rectangle-per-lint model.
+fn span_rect(range: &IUIAutomationTextRange, start: i32, end: i32) -> Option<Rect> {
+    unsafe {
+        let sub = sub_range(range, start, end)?;
         let array = sub.GetBoundingRectangles().ok()?;
         let values = uia::safearray_to_f64(array);
         rects::rects_from_quads(&values)
@@ -157,7 +299,7 @@ mod tests {
 
     #[test]
     fn reports_permission_granted() {
-        let broker = WindowsBroker;
+        let broker = WindowsBroker::default();
         assert_eq!(
             broker.accessibility_permission_status(),
             AccessibilityPermissionStatus::Granted
@@ -166,7 +308,7 @@ mod tests {
 
     #[test]
     fn cursor_position_is_some() {
-        let broker = WindowsBroker;
+        let broker = WindowsBroker::default();
         assert!(
             broker.cursor_position().is_some(),
             "cursor_position must return a real screen position"
@@ -178,7 +320,7 @@ mod tests {
         // The test harness has no focused text element, so this exercises the
         // early-return paths: no automation, no focused element, or an element
         // with no TextPattern. All must degrade to no highlights, not a panic.
-        let mut broker = WindowsBroker;
+        let mut broker = WindowsBroker::default();
         let mut lint_text: crate::os_broker::LintText = Box::new(|_| BTreeMap::new());
         let _ = broker.get_boxes(lint_text.as_mut());
     }

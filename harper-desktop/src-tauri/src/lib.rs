@@ -363,7 +363,7 @@ pub fn run_highlighter(has_parent: bool) {
     let broker = mac_broker::MacBroker::new(integrations);
 
     #[cfg(target_os = "windows")]
-    let broker = windows_broker::WindowsBroker;
+    let broker = windows_broker::WindowsBroker::new(integrations);
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let broker = os_broker::NoopBroker;
