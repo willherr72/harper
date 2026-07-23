@@ -180,6 +180,11 @@ dev-desktop-highlighter:
 
   cargo run -p harper-desktop -- highlighter
 
+# Run Harper Desktop's Rust tests. The platform brokers are cfg-gated, so this
+# only exercises platform-specific code when run on that platform.
+test-desktop:
+  cargo test -p harper-desktop
+
 # Check Harper Desktop frontend and Rust targets.
 check-desktop: build-harperjs build-lint-framework build-components build-harper-editor
   #!/usr/bin/env bash
