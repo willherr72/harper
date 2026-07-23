@@ -163,8 +163,23 @@ impl WindowManagerApp {
     /// the same thread that owns the overlay windows.
     fn read_rect_updates(&mut self) {
         let rects = self.os_broker.get_boxes(self.lint_text.as_mut());
+
         self.render_state.set_rects(rects);
 
+        // Windows: render directly instead of round-tripping through
+        // request_redraw. winit delivers RedrawRequested via WM_PAINT, which
+        // the OS only synthesizes when the thread's message queue is idle —
+        // and this event loop never idles (this poll re-marks every window
+        // dirty each tick), so paint events starve and only one of the
+        // per-monitor windows ever repaints. Direct rendering drives all of
+        // them deterministically. The RedrawRequested path still handles
+        // OS-initiated repaints such as resizes.
+        #[cfg(target_os = "windows")]
+        for window in &mut self.windows {
+            window.render(&mut self.render_state);
+        }
+
+        #[cfg(not(target_os = "windows"))]
         for window in &self.windows {
             window.request_redraw();
         }
