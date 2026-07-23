@@ -1,6 +1,8 @@
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
+#[cfg(target_os = "windows")]
+use egui_wgpu::WgpuSetupCreateNew;
 use egui_wgpu::winit::Painter;
 use egui_wgpu::{RendererOptions, WgpuConfiguration, WgpuSetup};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -10,7 +12,7 @@ use winit::monitor::MonitorHandle;
 use winit::window::{Window as WinitWindow, WindowButtons, WindowId, WindowLevel};
 
 use super::Error;
-use super::render_state::RenderState;
+use super::render_state::{RectTransform, RenderState};
 
 /// A transparent click-through overlay window for one monitor.
 ///
@@ -32,20 +34,29 @@ impl Window {
     ) -> Result<Self, Error> {
         let position = monitor.position();
         let size = monitor.size();
-        let window = Arc::new(
-            event_loop.create_window(
-                WinitWindow::default_attributes()
-                    .with_title("Harper")
-                    .with_inner_size(size)
-                    .with_position(position)
-                    .with_resizable(false)
-                    .with_enabled_buttons(WindowButtons::empty())
-                    .with_decorations(false)
-                    .with_transparent(true)
-                    .with_window_level(WindowLevel::AlwaysOnTop)
-                    .with_active(false),
-            )?,
-        );
+        let attributes = WinitWindow::default_attributes()
+            .with_title("Harper")
+            .with_inner_size(size)
+            .with_position(position)
+            .with_resizable(false)
+            .with_enabled_buttons(WindowButtons::empty())
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_window_level(WindowLevel::AlwaysOnTop)
+            .with_active(false);
+
+        // Without WS_EX_NOREDIRECTIONBITMAP a borderless window keeps its opaque
+        // GDI redirection surface, which DWM composites as white and hides the
+        // transparent DirectComposition-visual swapchain the overlay renders
+        // into (see the wgpu setup below). Decorated windows don't need this,
+        // but the overlay is deliberately borderless.
+        #[cfg(target_os = "windows")]
+        let attributes = {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attributes.with_no_redirection_bitmap(true)
+        };
+
+        let window = Arc::new(event_loop.create_window(attributes)?);
 
         window.set_outer_position(PhysicalPosition::new(position.x, position.y));
         let _ = window.request_inner_size(PhysicalSize::new(size.width, size.height));
@@ -61,10 +72,33 @@ impl Window {
             None,
         );
 
+        // On Windows the default DXGI swapchain is created from the window's
+        // HWND, and HWND flip-model swapchains only support an opaque
+        // `CompositeAlphaMode` — so the transparent overlay renders opaque.
+        // Selecting the DX12 backend with a DirectComposition-visual swapchain
+        // (`DxgiFromVisual`) exposes premultiplied alpha, which egui-wgpu then
+        // uses to composite the overlay transparently. Other platforms keep the
+        // default setup: Metal supports transparency already, and forcing DX12
+        // there would be invalid.
+        #[cfg(target_os = "windows")]
+        let wgpu_setup = {
+            let mut setup =
+                WgpuSetupCreateNew::from_display_handle(event_loop.owned_display_handle());
+            setup.instance_descriptor.backends = egui_wgpu::wgpu::Backends::DX12;
+            setup
+                .instance_descriptor
+                .backend_options
+                .dx12
+                .presentation_system = egui_wgpu::wgpu::Dx12SwapchainKind::DxgiFromVisual;
+            WgpuSetup::CreateNew(setup)
+        };
+        #[cfg(not(target_os = "windows"))]
+        let wgpu_setup = WgpuSetup::from_display_handle(event_loop.owned_display_handle());
+
         let mut painter = Painter::new(
             context,
             WgpuConfiguration {
-                wgpu_setup: WgpuSetup::from_display_handle(event_loop.owned_display_handle()),
+                wgpu_setup,
                 ..Default::default()
             },
             true,
@@ -120,11 +154,33 @@ impl Window {
         }
     }
 
+    /// Transform from the broker's global coordinate space into this window's
+    /// local egui points.
+    ///
+    /// On Windows the broker reports physical screen pixels, so the draw path
+    /// must subtract this window's origin and divide by its scale factor.
+    /// Elsewhere the identity transform preserves the existing 1:1 mapping.
+    fn rect_transform(&self) -> RectTransform {
+        #[cfg(target_os = "windows")]
+        {
+            let origin = self.inner.outer_position().unwrap_or_default();
+            RectTransform {
+                offset: egui::vec2(origin.x as f32, origin.y as f32),
+                scale: self.inner.scale_factor() as f32,
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            RectTransform::identity()
+        }
+    }
+
     pub fn render(&mut self, render_state: &mut RenderState) {
+        let transform = self.rect_transform();
         let context = self.egui_state.egui_ctx().clone();
         let input = self.egui_state.take_egui_input(&self.inner);
         let output = context.run_ui(input, |ui| {
-            render_state.render(ui);
+            render_state.render(ui, transform);
         });
 
         self.egui_state
