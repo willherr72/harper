@@ -8,7 +8,8 @@ use windows::Win32::System::Ole::{
     SafeArrayAccessData, SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayUnaccessData,
 };
 use windows::Win32::UI::Accessibility::{
-    IUIAutomation, IUIAutomationTextPattern, IUIAutomationTextRange, UIA_TextPatternId,
+    IUIAutomation, IUIAutomationTextPattern, IUIAutomationTextRange, IUIAutomationValuePattern,
+    UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_TextPatternId, UIA_ValuePatternId,
 };
 use windows::core::Interface;
 
@@ -43,11 +44,31 @@ pub fn safearray_to_f64(psa: *mut SAFEARRAY) -> Vec<f64> {
 /// Returns the `TextPattern` of the currently focused element, if it has one.
 ///
 /// Elements without a TextPattern — buttons, canvases, custom-drawn surfaces
-/// such as a schematic editor — yield `None`. That is the correct boundary of
-/// what can be linted, not an error.
+/// such as a schematic editor — yield `None`. So do elements that are not
+/// *editable* text: chat sidebars, message history, and list entries expose a
+/// TextPattern too, but flagging text the user cannot change is noise. This
+/// mirrors the macOS broker's `is_supported_text_element` role filter: only
+/// Edit and Document control types qualify, and an element whose ValuePattern
+/// reports read-only is skipped even then.
 pub fn focused_text_pattern(automation: &IUIAutomation) -> Option<IUIAutomationTextPattern> {
     unsafe {
         let element = automation.GetFocusedElement().ok()?;
+
+        let control_type = element.CurrentControlType().ok()?;
+        if control_type != UIA_EditControlTypeId && control_type != UIA_DocumentControlTypeId {
+            return None;
+        }
+
+        if let Ok(unknown) = element.GetCurrentPattern(UIA_ValuePatternId)
+            && let Ok(value) = unknown.cast::<IUIAutomationValuePattern>()
+            && value
+                .CurrentIsReadOnly()
+                .map(|b| b.as_bool())
+                .unwrap_or(false)
+        {
+            return None;
+        }
+
         let unknown = element.GetCurrentPattern(UIA_TextPatternId).ok()?;
         unknown.cast::<IUIAutomationTextPattern>().ok()
     }
