@@ -109,6 +109,11 @@ impl WindowManager {
 }
 
 struct WindowManagerApp {
+    /// Shared egui context handed to each overlay window.
+    ///
+    /// On Windows each window instead gets its own context (see `resumed`), so
+    /// this field is unused there.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     context: egui::Context,
     windows: Vec<Window>,
     render_state: RenderState,
@@ -258,7 +263,20 @@ impl ApplicationHandler for WindowManagerApp {
         }
 
         for monitor in monitors {
-            match pollster::block_on(Window::new(event_loop, monitor, self.context.clone())) {
+            // Each overlay window gets its own egui context on Windows. Sharing
+            // one context across the per-monitor windows makes egui's texture
+            // deltas race between their independent wgpu renderers: the initial
+            // font-atlas allocation reaches only the first window to render, so
+            // a later atlas update delivered to another window panics in
+            // egui-wgpu with "Tried to update a texture that has not been
+            // allocated yet." Independent contexts route each window's texture
+            // deltas to its own renderer. macOS keeps the shared context.
+            #[cfg(target_os = "windows")]
+            let context = egui::Context::default();
+            #[cfg(not(target_os = "windows"))]
+            let context = self.context.clone();
+
+            match pollster::block_on(Window::new(event_loop, monitor, context)) {
                 Ok(window) => self.windows.push(window),
                 Err(error) => {
                     self.error = Some(error);
