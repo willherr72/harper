@@ -1190,3 +1190,8 @@ html.dark .search-strip {
 html.dark .toggle.checked {
 	background: var(--settings-accent);
 }
+
+html.dark .select,
+html.dark .text-field {
+	color-scheme: dark;
+}
