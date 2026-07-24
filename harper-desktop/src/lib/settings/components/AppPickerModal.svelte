@@ -144,7 +144,7 @@ function submit() {
         {#if isDuplicate}
           <div class="empty">That application is already configured.</div>
         {:else}
-          <div class="empty">No matching apps found. Try typing the bundle ID directly (e.g., com.apple.TextEdit)</div>
+          <div class="empty">No matching apps found. Try typing the app identifier directly (e.g., notepad.exe or com.apple.TextEdit)</div>
         {/if}
       {:else}
         <div class="empty">Search for an app by name, or enter the bundle ID directly.</div>
