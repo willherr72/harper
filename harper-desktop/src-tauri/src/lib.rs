@@ -107,6 +107,15 @@ pub fn run() {
     tracing::subscriber::set_global_default(subscriber)
         .expect("Unable to set up tracing subscriber.");
 
+    // Route `log`-crate records (wgpu, egui-wgpu, winit) into tracing.
+    // Without this bridge their warnings are silently dropped — which has
+    // twice hidden real failures: the opaque-fallback warning when a surface
+    // offers no transparent alpha mode, and surface-lost errors after
+    // display sleep.
+    if let Err(error) = tracing_log::LogTracer::init() {
+        eprintln!("Unable to bridge log records into tracing: {error}");
+    }
+
     let args = Args::parse();
 
     match args.command {
