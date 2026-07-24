@@ -122,6 +122,14 @@ impl RenderState {
         self.highlighted_lint = None;
     }
 
+    /// Whether a suggestion popup is currently visible. The Windows render loop
+    /// uses this to keep painting while the card is open (egui widgets animate
+    /// on hover) and to schedule the erase frame when it closes.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn popup_open(&self) -> bool {
+        self.highlighted_lint.is_some()
+    }
+
     /// Finds the interactive highlighter region under a screen-space cursor position.
     ///
     /// Cursor polling lives outside the renderer, but hit-testing belongs next to the rectangles and
