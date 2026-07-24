@@ -31,6 +31,61 @@ enum LintCardAction {
     DisableRule,
 }
 
+thread_local! {
+    /// Whether card rendering uses the dark palette. Set by `RenderState::render`
+    /// for the duration of a frame; a thread local avoids threading a theme
+    /// parameter through every card-drawing helper.
+    static DARK_CARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Semantic colors for the suggestion card. Light values are exactly the
+/// palette the card has always used; dark values are their warm counterparts.
+struct CardPalette {
+    bg: egui::Color32,
+    stroke_soft: egui::Color32,
+    stroke_faint: egui::Color32,
+    strip: egui::Color32,
+    text_strong: egui::Color32,
+    text_body: egui::Color32,
+    text_muted: egui::Color32,
+    icon_idle: egui::Color32,
+    icon_hover_bg: egui::Color32,
+    code_bg: egui::Color32,
+    code_field: egui::Color32,
+}
+
+fn card_palette() -> CardPalette {
+    if DARK_CARD.with(|d| d.get()) {
+        CardPalette {
+            bg: hex(0x26, 0x21, 0x19),
+            stroke_soft: egui::Color32::from_rgba_unmultiplied(255, 255, 255, 26),
+            stroke_faint: egui::Color32::from_rgba_unmultiplied(255, 255, 255, 20),
+            strip: egui::Color32::from_rgba_unmultiplied(255, 255, 255, 10),
+            text_strong: hex(0xec, 0xe7, 0xdd),
+            text_body: hex(0xd6, 0xd0, 0xc4),
+            text_muted: hex(0xb0, 0xa9, 0x9c),
+            icon_idle: hex(0x9b, 0x94, 0x8a),
+            icon_hover_bg: egui::Color32::from_rgba_unmultiplied(255, 255, 255, 20),
+            code_bg: hex(0x3a, 0x35, 0x2b),
+            code_field: hex(0x2a, 0x26, 0x1e),
+        }
+    } else {
+        CardPalette {
+            bg: hex(0xff, 0xfd, 0xfa),
+            stroke_soft: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 20),
+            stroke_faint: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 15),
+            strip: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 5),
+            text_strong: hex(0x0a, 0x0a, 0x0a),
+            text_body: hex(0x37, 0x41, 0x51),
+            text_muted: hex(0x4b, 0x55, 0x63),
+            icon_idle: hex(0x6b, 0x72, 0x80),
+            icon_hover_bg: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 15),
+            code_bg: hex(0xf3, 0xf4, 0xf6),
+            code_field: hex(0xf8, 0xfa, 0xfc),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PopupStyle {
     color: egui::Color32,
@@ -72,6 +127,11 @@ pub struct RenderState {
 
     /// Called when the user disables the rule that produced the selected lint.
     disable_rule: DisableRule,
+
+    /// Whether the suggestion card renders with the dark palette. Only the
+    /// Windows window manager sets this; other platforms keep the default
+    /// light rendering.
+    dark: bool,
 }
 
 impl RenderState {
@@ -90,6 +150,7 @@ impl RenderState {
             ignore_lint,
             add_to_dictionary,
             disable_rule,
+            dark: false,
         };
         state.set_rects(rects);
         state
@@ -120,6 +181,12 @@ impl RenderState {
     /// Centralizes the close behavior so the popup close button only has to clear the selected lint.
     pub fn close_popup(&mut self) {
         self.highlighted_lint = None;
+    }
+
+    /// Selects the card palette for subsequent renders.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn set_dark(&mut self, dark: bool) {
+        self.dark = dark;
     }
 
     /// Whether a suggestion popup is currently visible. The Windows render loop
@@ -165,6 +232,8 @@ impl RenderState {
     /// Draws highlights and the active popup from the same state used by hit-testing so visible
     /// regions and clickable regions do not drift apart.
     pub fn render(&mut self, ui: &mut egui::Ui, transform: RectTransform) {
+        DARK_CARD.with(|d| d.set(self.dark));
+
         for positioned_lint in &self.rects {
             draw_highlight(
                 ui,
@@ -281,12 +350,10 @@ fn render_lint_card(
         .show(ui.ctx(), |ui| {
             let mut action = None;
 
+            let palette = card_palette();
             egui::Frame::new()
-                .fill(hex(0xff, 0xfd, 0xfa))
-                .stroke(egui::Stroke::new(
-                    1.0_f32,
-                    egui::Color32::from_rgba_unmultiplied(0, 0, 0, 20),
-                ))
+                .fill(palette.bg)
+                .stroke(egui::Stroke::new(1.0_f32, palette.stroke_soft))
                 .corner_radius(egui::CornerRadius::same(12))
                 .inner_margin(egui::Margin::same(0))
                 .shadow(egui::Shadow {
@@ -314,11 +381,8 @@ fn render_popover_header(ui: &mut egui::Ui, lint: &Lint, action: &mut Option<Lin
     let style = popup_style_for_lint_kind(lint.lint_kind);
 
     egui::Frame::new()
-        .fill(blend(style.background, hex(0xff, 0xfd, 0xfa), 0.42))
-        .stroke(egui::Stroke::new(
-            1.0_f32,
-            egui::Color32::from_rgba_unmultiplied(0, 0, 0, 15),
-        ))
+        .fill(blend(style.background, card_palette().bg, 0.42))
+        .stroke(egui::Stroke::new(1.0_f32, card_palette().stroke_faint))
         .corner_radius(egui::CornerRadius {
             nw: 12,
             ne: 12,
@@ -352,7 +416,7 @@ fn render_popover_body(
     action: &mut Option<LintCardAction>,
 ) {
     egui::Frame::new()
-        .fill(hex(0xff, 0xfd, 0xfa))
+        .fill(card_palette().bg)
         .inner_margin(egui::Margin::symmetric(16, 12))
         .show(ui, |ui| {
             ui.set_width(CARD_WIDTH - 32.0);
@@ -385,11 +449,8 @@ fn render_popover_footer(
     action: &mut Option<LintCardAction>,
 ) {
     egui::Frame::new()
-        .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 5))
-        .stroke(egui::Stroke::new(
-            1.0_f32,
-            egui::Color32::from_rgba_unmultiplied(0, 0, 0, 15),
-        ))
+        .fill(card_palette().strip)
+        .stroke(egui::Stroke::new(1.0_f32, card_palette().stroke_faint))
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
             ui.set_width(CARD_WIDTH - 20.0);
@@ -422,10 +483,11 @@ fn render_popover_footer(
 /// markers to the user.
 fn render_lint_message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, message: &str) {
     ui.scope(|ui| {
-        ui.visuals_mut().code_bg_color = hex(0xf3, 0xf4, 0xf6);
-        ui.visuals_mut().extreme_bg_color = hex(0xf8, 0xfa, 0xfc);
-        ui.visuals_mut().override_text_color = Some(hex(0x37, 0x41, 0x51));
-        ui.visuals_mut().text_edit_bg_color = Some(hex(0xf8, 0xfa, 0xfc));
+        let palette = card_palette();
+        ui.visuals_mut().code_bg_color = palette.code_bg;
+        ui.visuals_mut().extreme_bg_color = palette.code_field;
+        ui.visuals_mut().override_text_color = Some(palette.text_body);
+        ui.visuals_mut().text_edit_bg_color = Some(palette.code_field);
         CommonMarkViewer::new()
             .default_width(Some(ui.available_width() as usize))
             .show(ui, cache, message);
@@ -463,21 +525,22 @@ fn suggestion_option(
     suggestion: &Suggestion,
     primary: bool,
 ) -> egui::Response {
+    let palette = card_palette();
     let lint_color = lint_kind_color32(lint_kind);
     let fill = if primary {
         lint_color
     } else {
-        blend(lint_color, hex(0xff, 0xfd, 0xfa), 0.88)
+        blend(lint_color, palette.bg, 0.88)
     };
     let text_color = if primary {
         hex(0xff, 0xfd, 0xfa)
     } else {
-        hex(0x0a, 0x0a, 0x0a)
+        palette.text_strong
     };
     let stroke = if primary {
         egui::Stroke::NONE
     } else {
-        egui::Stroke::new(1.0_f32, blend(lint_color, hex(0xff, 0xfd, 0xfa), 0.64))
+        egui::Stroke::new(1.0_f32, blend(lint_color, palette.bg, 0.64))
     };
 
     ui.scope(|ui| {
@@ -509,15 +572,16 @@ fn suggestion_option(
 /// behavior beyond the response returned to the caller.
 fn icon_button(ui: &mut egui::Ui, glyph: Glyph, text: &str) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::click());
+    let palette = card_palette();
     let background = if response.hovered() {
-        egui::Color32::from_rgba_unmultiplied(0, 0, 0, 15)
+        palette.icon_hover_bg
     } else {
         egui::Color32::TRANSPARENT
     };
     let color = if response.hovered() {
-        hex(0x00, 0x00, 0x00)
+        palette.text_strong
     } else {
-        hex(0x6b, 0x72, 0x80)
+        palette.icon_idle
     };
 
     ui.painter().rect_filled(rect, 6.0, background);
@@ -545,7 +609,7 @@ fn ghost_button(
             egui::Button::new(
                 egui::RichText::new(label)
                     .size(12.0)
-                    .color(hex(0x4b, 0x55, 0x63)),
+                    .color(card_palette().text_muted),
             )
             .fill(egui::Color32::TRANSPARENT)
             .stroke(egui::Stroke::NONE)
@@ -564,11 +628,8 @@ fn hover_text(response: egui::Response, hover_text: impl Into<String>) -> egui::
     let mut tooltip = egui::Tooltip::for_enabled(&response);
     tooltip.popup = tooltip.popup.frame(
         egui::Frame::new()
-            .fill(hex(0xff, 0xfd, 0xfa))
-            .stroke(egui::Stroke::new(
-                1.0_f32,
-                egui::Color32::from_rgba_unmultiplied(0, 0, 0, 20),
-            ))
+            .fill(card_palette().bg)
+            .stroke(egui::Stroke::new(1.0_f32, card_palette().stroke_soft))
             .corner_radius(egui::CornerRadius::same(8))
             .inner_margin(egui::Margin::symmetric(8, 6))
             .shadow(egui::Shadow {
@@ -583,7 +644,7 @@ fn hover_text(response: egui::Response, hover_text: impl Into<String>) -> egui::
         ui.label(
             egui::RichText::new(hover_text)
                 .size(12.0)
-                .color(hex(0x4b, 0x55, 0x63)),
+                .color(card_palette().text_muted),
         );
     });
 

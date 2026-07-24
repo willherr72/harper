@@ -75,7 +75,7 @@ $: chars = text.length;
 		<span>{fontSize === 'default' ? 'Default' : `${fontSize}px`}</span>
 		<select
 			value={fontSize}
-			class="absolute inset-0 border-0 opacity-0"
+			class="absolute inset-0 border-0 opacity-0 dark:[color-scheme:dark]"
 			aria-label="Font size"
 			on:change={(event) => {
 				const value = event.currentTarget.value;
