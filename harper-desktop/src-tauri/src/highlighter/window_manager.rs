@@ -139,6 +139,12 @@ struct WindowManagerApp {
     /// the card closes. Used on Windows only.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     popup_was_open: bool,
+    /// Last unconditional repaint. The change-driven render skip means a GPU
+    /// surface invalidated by display sleep would otherwise stay blank until
+    /// the scene next changes; a low-frequency heartbeat restores the
+    /// self-healing the old every-tick render provided. Used on Windows only.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    last_heartbeat: Instant,
     error: Option<Error>,
 }
 
@@ -181,6 +187,7 @@ impl WindowManagerApp {
             scene_signature: 0,
             scene_dirty: true,
             popup_was_open: false,
+            last_heartbeat: Instant::now(),
             error: None,
         }
     }
@@ -252,6 +259,12 @@ impl WindowManagerApp {
             // card mutates popup state *during* that frame's render, so one
             // more paint is needed afterwards to clear the card from screen.
             let popup_open = self.render_state.popup_open();
+
+            if self.last_heartbeat.elapsed() >= Duration::from_secs(5) {
+                self.last_heartbeat = Instant::now();
+                self.scene_dirty = true;
+            }
+
             let render_needed = self.scene_dirty || popup_open || self.popup_was_open;
             if render_needed {
                 for window in &mut self.windows {
@@ -413,6 +426,17 @@ impl ApplicationHandler for WindowManagerApp {
             }
         );
         let should_render = matches!(&event, WindowEvent::RedrawRequested);
+
+        // Display wake, occlusion change, and focus change can all follow a
+        // period in which the surface was invalidated; repaint promptly rather
+        // than waiting for the heartbeat.
+        #[cfg(target_os = "windows")]
+        if matches!(
+            &event,
+            WindowEvent::Occluded(_) | WindowEvent::Focused(_) | WindowEvent::Moved(_)
+        ) {
+            self.scene_dirty = true;
+        }
 
         if let Some(window) = self
             .windows
