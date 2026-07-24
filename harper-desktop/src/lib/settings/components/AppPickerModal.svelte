@@ -100,7 +100,7 @@ function submit() {
   >
     <div class="modal-head">
       <strong>Add application</strong>
-      <span>Enter the app bundle ID Harper should watch.</span>
+      <span>Choose the application Harper should watch.</span>
     </div>
     <div class="modal-search">
       <span class="settings-icon icon-search" aria-hidden="true"></span>
@@ -124,6 +124,7 @@ function submit() {
         {#each searchResults as result}
           <div
             class="app-result"
+            class:selected={result.bundle_id === bundleId.trim()}
             role="button"
             tabindex="0"
             on:click={() => selectApp(result.bundle_id)}
@@ -147,7 +148,7 @@ function submit() {
           <div class="empty">No matching apps found. Try typing the app identifier directly (e.g., notepad.exe or com.apple.TextEdit)</div>
         {/if}
       {:else}
-        <div class="empty">Search for an app by name, or enter the bundle ID directly.</div>
+        <div class="empty">Search for an app by name, or enter its identifier directly.</div>
       {/if}
     </div>
     <div class="modal-actions">
