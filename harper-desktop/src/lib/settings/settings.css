@@ -1195,3 +1195,24 @@ html.dark .select,
 html.dark .text-field {
 	color-scheme: dark;
 }
+
+/* Selected state for the app picker — previously the only feedback was the
+   chosen id appearing in the search field. */
+.app-result.selected {
+	background: rgba(42, 107, 216, 0.1);
+	outline: 1.5px solid var(--settings-accent);
+	outline-offset: -1.5px;
+}
+
+html.dark .modal-search input {
+	border-color: rgba(255, 255, 255, 0.16);
+	background: #262219;
+}
+
+html.dark .app-result:hover {
+	background: rgba(255, 255, 255, 0.05);
+}
+
+html.dark .app-result.selected {
+	background: rgba(91, 150, 245, 0.16);
+}
