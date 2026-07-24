@@ -145,6 +145,11 @@ struct WindowManagerApp {
     /// self-healing the old every-tick render provided. Used on Windows only.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     last_heartbeat: Instant,
+    /// Last event-loop tick, used to detect system suspend: the loop cannot
+    /// tick through sleep, so a large gap means the machine resumed and the
+    /// overlay surfaces need rebinding. Used on Windows only.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    last_tick: Instant,
     error: Option<Error>,
 }
 
@@ -188,6 +193,7 @@ impl WindowManagerApp {
             scene_dirty: true,
             popup_was_open: false,
             last_heartbeat: Instant::now(),
+            last_tick: Instant::now(),
             error: None,
         }
     }
@@ -357,6 +363,22 @@ fn monitor_refresh_interval(monitor: &MonitorHandle) -> Option<Duration> {
 impl ApplicationHandler for WindowManagerApp {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+
+        // A gap this large means the event loop was frozen — i.e. the system
+        // was suspended. The DirectComposition visuals behind the overlay
+        // surfaces can detach across resume without any error, leaving every
+        // subsequent render presenting to nowhere; rebind them.
+        #[cfg(target_os = "windows")]
+        {
+            if now.duration_since(self.last_tick) > Duration::from_secs(30) {
+                eprintln!("resume detected; rebinding overlay surfaces");
+                for window in &mut self.windows {
+                    window.rebind_surface();
+                }
+                self.scene_dirty = true;
+            }
+            self.last_tick = now;
+        }
 
         if now.duration_since(self.last_read) >= self.read_interval {
             self.read_rect_updates();
