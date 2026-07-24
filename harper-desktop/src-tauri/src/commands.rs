@@ -43,6 +43,7 @@ pub fn application_message_handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool {
         stop_highlighter_service,
         launch_app,
         search_apps,
+        platform,
     ]
 }
 
@@ -373,4 +374,11 @@ fn search_apps(
         .lock()
         .map_err(|error| format!("Failed to read platform broker: {error}"))?
         .search_apps(&query)
+}
+
+/// The compile-time operating system, so the frontend can adapt copy and
+/// platform-specific flows without a separate plugin dependency.
+#[tauri::command]
+fn platform() -> &'static str {
+    std::env::consts::OS
 }
