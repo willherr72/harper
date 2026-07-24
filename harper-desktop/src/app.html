@@ -5,6 +5,29 @@
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Harper Desktop</title>
+    <script>
+      // Follow the system theme. The component library ships `dark:` styles
+      // behind a class-based Tailwind variant (`@custom-variant dark`), but
+      // nothing ever applied the class, so the dark theme was dormant on
+      // every platform. Runs before first paint to avoid a light flash.
+      (function () {
+        const media = window.matchMedia('(prefers-color-scheme: dark)');
+        const apply = function () {
+          document.documentElement.classList.toggle('dark', media.matches);
+          document.documentElement.style.colorScheme = media.matches ? 'dark' : 'light';
+        };
+        apply();
+        media.addEventListener('change', apply);
+      })();
+    </script>
+    <style>
+      /* Base surface for dark mode; pages whose scoped styles set their own
+         light backgrounds are overridden per component. */
+      html.dark body {
+        background-color: #1e1b18;
+        color: #eae5de;
+      }
+    </style>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">
