@@ -125,8 +125,30 @@ struct WindowManagerApp {
     refresh_config: RefreshConfig,
     hovered_lint: Option<usize>,
     cursor_hittest_enabled: bool,
+    /// Counts poll ticks so the expensive accessibility read can run on a
+    /// divider of the render cadence. Used on Windows only.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    read_tick: u32,
+    /// Hash of the last scene handed to the renderer, plus a dirty flag, so
+    /// identical frames are not re-rendered. Used on Windows only.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    scene_signature: u64,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    scene_dirty: bool,
+    /// Popup visibility on the previous tick, to schedule the erase frame when
+    /// the card closes. Used on Windows only.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    popup_was_open: bool,
     error: Option<Error>,
 }
+
+/// On Windows the accessibility read runs on every Nth poll tick (~10 Hz at a
+/// 60 Hz display) instead of every tick. Walking UIA — focused element, text,
+/// one sub-range per lint — is cross-process COM and dominated the process's
+/// CPU at 60 Hz, while lint freshness is already bounded by the lint debounce.
+/// Cursor hit-testing and rendering stay at full tick rate.
+#[cfg(target_os = "windows")]
+const READ_TICK_DIVIDER: u32 = 6;
 
 impl WindowManagerApp {
     /// Builds the mutable application state consumed by winit callbacks after `WindowManager` gives
@@ -155,16 +177,61 @@ impl WindowManagerApp {
             refresh_config: callbacks.refresh_config,
             hovered_lint: None,
             cursor_hittest_enabled: false,
+            read_tick: 0,
+            scene_signature: 0,
+            scene_dirty: true,
+            popup_was_open: false,
             error: None,
         }
+    }
+
+    /// Order-sensitive hash of the lint geometry the renderer would draw.
+    ///
+    /// Two reads that produce the same rectangles for the same lint kinds
+    /// produce the same signature, letting the render loop skip repainting an
+    /// unchanged scene.
+    #[cfg(target_os = "windows")]
+    fn scene_signature_of(rects: &[ActionableLint]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        for lint in rects {
+            lint.rect.x.to_bits().hash(&mut hasher);
+            lint.rect.y.to_bits().hash(&mut hasher);
+            lint.rect.width.to_bits().hash(&mut hasher);
+            lint.rect.height.to_bits().hash(&mut hasher);
+            std::mem::discriminant(&lint.lint.lint_kind).hash(&mut hasher);
+        }
+        hasher.finish()
     }
 
     /// Refreshes lint geometry from the OS broker inside the event loop so repaint requests happen on
     /// the same thread that owns the overlay windows.
     fn read_rect_updates(&mut self) {
-        let rects = self.os_broker.get_boxes(self.lint_text.as_mut());
+        // Windows: divide the accessibility read down from the render cadence,
+        // reusing the previous rectangles between reads.
+        #[cfg(target_os = "windows")]
+        let read_now = {
+            let due = self.read_tick == 0;
+            self.read_tick = (self.read_tick + 1) % READ_TICK_DIVIDER;
+            due
+        };
+        #[cfg(not(target_os = "windows"))]
+        let read_now = true;
 
-        self.render_state.set_rects(rects);
+        if read_now {
+            let rects = self.os_broker.get_boxes(self.lint_text.as_mut());
+
+            #[cfg(target_os = "windows")]
+            {
+                let signature = Self::scene_signature_of(&rects);
+                if signature != self.scene_signature {
+                    self.scene_signature = signature;
+                    self.scene_dirty = true;
+                }
+            }
+
+            self.render_state.set_rects(rects);
+        }
 
         // Windows: render directly instead of round-tripping through
         // request_redraw. winit delivers RedrawRequested via WM_PAINT, which
@@ -174,9 +241,25 @@ impl WindowManagerApp {
         // per-monitor windows ever repaints. Direct rendering drives all of
         // them deterministically. The RedrawRequested path still handles
         // OS-initiated repaints such as resizes.
+        //
+        // Identical frames are skipped: with an unchanged scene and no popup
+        // open there is nothing new to draw, and repainting three 4K overlay
+        // surfaces per tick was the dominant idle cost. An open popup forces
+        // continuous rendering because egui widgets animate on hover.
         #[cfg(target_os = "windows")]
-        for window in &mut self.windows {
-            window.render(&mut self.render_state);
+        {
+            // popup_was_open covers the erase frame: the click that closes the
+            // card mutates popup state *during* that frame's render, so one
+            // more paint is needed afterwards to clear the card from screen.
+            let popup_open = self.render_state.popup_open();
+            let render_needed = self.scene_dirty || popup_open || self.popup_was_open;
+            if render_needed {
+                for window in &mut self.windows {
+                    window.render(&mut self.render_state);
+                }
+                self.scene_dirty = false;
+            }
+            self.popup_was_open = self.render_state.popup_open();
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -336,6 +419,17 @@ impl ApplicationHandler for WindowManagerApp {
             .iter_mut()
             .find(|window| window.id() == window_id)
         {
+            // Windows: do not feed RedrawRequested back into egui. egui answers
+            // any processed event with a repaint request, which handle_event
+            // turns into another request_redraw — a self-sustaining paint loop
+            // (~50 fps per window, forever) that was the entire idle CPU cost.
+            // Rendering still happens below; interaction events still reach
+            // egui and still trigger their own repaints.
+            #[cfg(target_os = "windows")]
+            if !should_render {
+                window.handle_event(&event);
+            }
+            #[cfg(not(target_os = "windows"))]
             window.handle_event(&event);
 
             if should_render {
