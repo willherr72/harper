@@ -30,6 +30,13 @@ pub fn foreground_executable_name() -> Option<String> {
             return None;
         }
 
+        executable_name_for_pid(pid)
+    }
+}
+
+/// Lowercase executable file name of a process, e.g. `"notepad.exe"`.
+pub fn executable_name_for_pid(pid: u32) -> Option<String> {
+    unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buffer = [0u16; MAX_PATH as usize];
         let mut length = buffer.len() as u32;

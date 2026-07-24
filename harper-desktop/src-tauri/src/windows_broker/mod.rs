@@ -1,5 +1,6 @@
 //! Windows implementation of [`OsBroker`], backed by UI Automation.
 
+mod app_search;
 mod apply;
 mod foreground;
 mod offsets;
@@ -21,7 +22,7 @@ use windows::Win32::UI::Accessibility::{
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 use crate::config::Integration;
-use crate::os_broker::{AccessibilityPermissionStatus, OsBroker};
+use crate::os_broker::{AccessibilityPermissionStatus, AppSearchResult, OsBroker};
 use crate::rect::{ActionableLint, Rect};
 
 /// Upper bound on text read from a single range.
@@ -212,6 +213,27 @@ impl OsBroker for WindowsBroker {
         } else {
             pretty
         }
+    }
+
+    fn search_apps(&self, query: &str) -> Result<Vec<AppSearchResult>, String> {
+        let needle = query.trim().to_lowercase();
+
+        let mut results: Vec<AppSearchResult> = app_search::discover_executables()
+            .into_iter()
+            .filter_map(|exe| {
+                let name = self.system_integration_display_name(&exe);
+                let matches = needle.is_empty()
+                    || name.to_lowercase().contains(&needle)
+                    || exe.contains(&needle);
+                matches.then_some(AppSearchResult {
+                    name,
+                    bundle_id: exe,
+                })
+            })
+            .collect();
+
+        results.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(results)
     }
 }
 
