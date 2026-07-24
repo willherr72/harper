@@ -83,3 +83,17 @@
 		--settings-icon-url: url("/settings-icons/x.svg");
 	}
 }
+
+/* Native select popups in this WebView2 ignore the element's color-scheme:
+   the popup keeps a light background while item text inherits the dark
+   theme's light color — unreadable. Chromium does honor option styling
+   inside the popup, so theme the options directly. Covers every select in
+   both the settings and editor windows. */
+html.dark select {
+	color-scheme: dark;
+}
+
+html.dark select option {
+	background-color: #262119;
+	color: #ece7dd;
+}
