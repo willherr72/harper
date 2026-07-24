@@ -1,16 +1,33 @@
 <script lang="ts">
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { onMount } from 'svelte';
+import { Client } from '$lib/client';
 import { DesktopUpdater } from '$lib/DesktopUpdater';
+
+const PLATFORM_LABELS: Record<string, string> = {
+	macos: 'Mac',
+	windows: 'Windows',
+	linux: 'Linux',
+};
 
 const SOURCE_URL = 'https://github.com/Automattic/harper';
 const ISSUE_URL = 'https://github.com/Automattic/harper/issues/new/choose';
 
 let currentVersion = '';
+let platformLabel = '';
 
 onMount(() => {
 	void loadCurrentVersion();
+	void loadPlatformLabel();
 });
+
+async function loadPlatformLabel() {
+	try {
+		platformLabel = PLATFORM_LABELS[await Client.platform()] ?? '';
+	} catch (error) {
+		console.error('Unable to determine platform.', error);
+	}
+}
 
 async function loadCurrentVersion() {
 	try {
@@ -23,7 +40,7 @@ async function loadCurrentVersion() {
 
 <section class="about">
         <div class="about-mark">H</div>
-        <h1>Harper for Mac</h1>
+        <h1>Harper{platformLabel ? ` for ${platformLabel}` : ''}</h1>
         <p class="muted">Version {currentVersion || 'unknown'}</p>
         <p>
           An open-source grammar checker that runs entirely on your device. No accounts, no
