@@ -215,6 +215,37 @@ impl OsBroker for WindowsBroker {
         }
     }
 
+    fn launch_app_bundle(&self, bundle_id: &str) -> Result<(), String> {
+        // ShellExecuteW resolves bare executable names through PATH and the
+        // App Paths registry, which is exactly how integrations are keyed.
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        use windows::core::{HSTRING, PCWSTR};
+
+        let operation = HSTRING::from("open");
+        let file = HSTRING::from(bundle_id);
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                PCWSTR(operation.as_ptr()),
+                PCWSTR(file.as_ptr()),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            )
+        };
+
+        // Per the API contract, values greater than 32 indicate success.
+        if result.0 as usize > 32 {
+            Ok(())
+        } else {
+            Err(format!(
+                "could not launch {bundle_id} (code {})",
+                result.0 as usize
+            ))
+        }
+    }
+
     fn search_apps(&self, query: &str) -> Result<Vec<AppSearchResult>, String> {
         let needle = query.trim().to_lowercase();
 

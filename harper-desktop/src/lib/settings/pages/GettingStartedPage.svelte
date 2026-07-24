@@ -28,11 +28,25 @@ let hasRequestedAccessibility = false;
 let integrations: Integration[] = [];
 let integrationsError = '';
 let isLoadingIntegrations = true;
+// The onboarding demo application, chosen per platform. Defaults to the
+// macOS values until the platform query resolves.
+let demoApp = { bundleId: 'com.apple.TextEdit', name: 'TextEdit' };
+
+void (async () => {
+	try {
+		if ((await Client.platform()) === 'windows') {
+			demoApp = { bundleId: 'notepad.exe', name: 'Notepad' };
+		}
+	} catch (error) {
+		console.error('Unable to determine platform for onboarding.', error);
+	}
+})();
+
 let isEnablingTextEdit = false;
 let isLaunchingTextEdit = false;
 let testDriveError = '';
 
-$: textEditIntegration = integrations.find((item) => item.bundle_id === 'com.apple.TextEdit');
+$: textEditIntegration = integrations.find((item) => item.bundle_id === demoApp.bundleId);
 $: isTextEditEnabled = textEditIntegration?.enabled === true;
 
 $: setupSteps = buildSetupSteps(
@@ -76,17 +90,17 @@ async function enableTextEditForSetup() {
 
 	try {
 		if (textEditIntegration) {
-			await Client.setIntegrationEnabled('com.apple.TextEdit', true);
+			await Client.setIntegrationEnabled(demoApp.bundleId, true);
 			integrations = integrations.map((integration) =>
-				integration.bundle_id === 'com.apple.TextEdit'
+				integration.bundle_id === demoApp.bundleId
 					? { ...integration, enabled: true }
 					: integration,
 			);
 		} else {
-			await Client.addIntegration('com.apple.TextEdit');
+			await Client.addIntegration(demoApp.bundleId);
 			integrations = [
 				...integrations,
-				{ bundle_id: 'com.apple.TextEdit', enabled: true, display_name: 'TextEdit' },
+				{ bundle_id: demoApp.bundleId, enabled: true, display_name: demoApp.name },
 			];
 		}
 
@@ -96,7 +110,7 @@ async function enableTextEditForSetup() {
 			setup: { ...state.setup, integration: 'selected' },
 		};
 	} catch (error) {
-		integrationsError = `Unable to enable TextEdit: ${error}`;
+		integrationsError = `Unable to enable ${demoApp.name}: ${error}`;
 	} finally {
 		isEnablingTextEdit = false;
 	}
@@ -107,10 +121,10 @@ async function launchTextEditForTestDrive() {
 	testDriveError = '';
 
 	try {
-		await Client.launchApp('com.apple.TextEdit');
+		await Client.launchApp(demoApp.bundleId);
 		updateSetup({ testDrive: 'completed' });
 	} catch (error) {
-		testDriveError = `Unable to launch TextEdit: ${error}`;
+		testDriveError = `Unable to launch ${demoApp.name}: ${error}`;
 	} finally {
 		isLaunchingTextEdit = false;
 	}
@@ -237,7 +251,7 @@ function buildSetupSteps(
 		{
 			id: 'integration',
 			title: 'Pick an app to test',
-			desc: 'Start with TextEdit, then add more apps from Integrations when you are ready.',
+			desc: `Start with ${demoApp.name}, then add more apps from Integrations when you are ready.`,
 			required: true,
 			done: integrationDone,
 			locked: !accessibilityDone,
@@ -249,7 +263,7 @@ function buildSetupSteps(
 		{
 			id: 'test-drive',
 			title: 'Take a test drive',
-			desc: 'Open TextEdit, type "its not alot of fun", and watch Harper underline the mistakes.',
+			desc: `Open ${demoApp.name}, type "its not alot of fun", and watch Harper underline the mistakes.`,
 			required: false,
 			done: testDriveDone,
 			locked: !accessibilityDone || !integrationDone,
@@ -257,7 +271,7 @@ function buildSetupSteps(
 				? 'Launching...'
 				: testDriveDone
 					? 'Run again'
-					: 'Launch TextEdit',
+					: `Launch ${demoApp.name}`,
 			actionVariant: testDriveDone ? 'default' : 'primary',
 			action: launchTextEditForTestDrive,
 			actionDisabled: isLaunchingTextEdit,
@@ -355,7 +369,7 @@ function buildSetupSteps(
                   <div class="detected-app">
                     <div class="big-mark amber">!</div>
                     <div class="grow">
-                      <strong>TextEdit launch failed</strong>
+                      <strong>{demoApp.name} launch failed</strong>
                       <p>{testDriveError}</p>
                     </div>
                   </div>
@@ -371,25 +385,25 @@ function buildSetupSteps(
                   </div>
                 {:else if step.id === "integration" && accessibilityStatus === "Granted" && isLoadingIntegrations}
                   <div class="detected-app">
-                    <AppIcon bundleId="com.apple.TextEdit" name="TextEdit" />
+                    <AppIcon bundleId={demoApp.bundleId} name={demoApp.name} />
                     <div class="grow">
-                      <strong>Checking TextEdit</strong>
+                      <strong>Checking {demoApp.name}</strong>
                       <p>Loading integration state...</p>
                     </div>
                   </div>
                 {:else if step.id === "integration" && accessibilityStatus === "Granted" && isTextEditEnabled}
                   <div class="detected-app">
-                    <AppIcon bundleId="com.apple.TextEdit" name="TextEdit" />
+                    <AppIcon bundleId={demoApp.bundleId} name={demoApp.name} />
                     <div class="grow">
-                      <strong>TextEdit enabled</strong>
-                      <p>Harper is configured to check TextEdit.</p>
+                      <strong>{demoApp.name} enabled</strong>
+                      <p>Harper is configured to check {demoApp.name}.</p>
                     </div>
                   </div>
                 {:else if step.id === "integration" && accessibilityStatus === "Granted"}
                   <div class="detected-app">
-                    <AppIcon bundleId="com.apple.TextEdit" name="TextEdit" />
+                    <AppIcon bundleId={demoApp.bundleId} name={demoApp.name} />
                     <div class="grow">
-                      <strong>TextEdit detected</strong>
+                      <strong>{demoApp.name} detected</strong>
                       <p>A good starter app for trying Harper.</p>
                     </div>
                     <button class="button primary" type="button" disabled={isEnablingTextEdit} on:click={enableTextEditForSetup}>
@@ -412,6 +426,6 @@ function buildSetupSteps(
 
         <div class="note-strip">
           <strong>On-device by default.</strong>
-          <span>Your writing stays on this Mac in this demo surface.</span>
+          <span>Your writing stays on this device in this demo surface.</span>
         </div>
       </section>

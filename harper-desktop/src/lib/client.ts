@@ -188,6 +188,10 @@ export class Client {
 		);
 	}
 
+	static async platform(): Promise<string> {
+		return await invoke<string>('platform');
+	}
+
 	static async startHighlighterService(): Promise<boolean> {
 		return await invoke<boolean>('start_highlighter_service');
 	}
