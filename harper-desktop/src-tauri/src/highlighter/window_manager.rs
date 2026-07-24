@@ -273,6 +273,8 @@ impl WindowManagerApp {
 
             let render_needed = self.scene_dirty || popup_open || self.popup_was_open;
             if render_needed {
+                let dark = self.windows.first().is_some_and(Window::is_dark);
+                self.render_state.set_dark(dark);
                 for window in &mut self.windows {
                     window.render(&mut self.render_state);
                 }

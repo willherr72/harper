@@ -173,6 +173,12 @@ impl Window {
         self.inner.request_redraw();
     }
 
+    /// Whether the OS reports this window as dark-themed.
+    #[cfg(target_os = "windows")]
+    pub fn is_dark(&self) -> bool {
+        matches!(self.inner.theme(), Some(winit::window::Theme::Dark))
+    }
+
     pub fn id(&self) -> WindowId {
         self.inner.id()
     }
