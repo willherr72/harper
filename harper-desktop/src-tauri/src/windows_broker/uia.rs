@@ -74,31 +74,15 @@ pub fn focused_text_pattern(automation: &IUIAutomation) -> Option<IUIAutomationT
     }
 }
 
-/// Returns the ranges currently visible on screen, falling back to the whole
-/// document.
+/// Returns the range covering the element's entire text.
 ///
-/// `GetBoundingRectangles` returns nothing for off-screen text, so linting the
-/// entire document yields highlights that silently fail to render. Some
-/// providers report zero visible ranges but work correctly through the document
-/// range — Outlook's recipient field behaves this way — hence the fallback.
-pub fn visible_or_document_ranges(
-    pattern: &IUIAutomationTextPattern,
-) -> Vec<IUIAutomationTextRange> {
-    unsafe {
-        if let Ok(array) = pattern.GetVisibleRanges()
-            && let Ok(count) = array.Length()
-            && count > 0
-        {
-            let ranges: Vec<_> = (0..count)
-                .filter_map(|i| array.GetElement(i).ok())
-                .collect();
-            if !ranges.is_empty() {
-                return ranges;
-            }
-        }
-
-        pattern.DocumentRange().map(|r| vec![r]).unwrap_or_default()
-    }
+/// Deliberately not `GetVisibleRanges`: providers split that into one range per
+/// visual line, and linting per range treats every wrapped line as its own
+/// document. Off-screen text costs nothing here — `GetBoundingRectangles`
+/// returns no rectangles for it, so those lints are skipped when their geometry
+/// is resolved.
+pub fn document_range(pattern: &IUIAutomationTextPattern) -> Option<IUIAutomationTextRange> {
+    unsafe { pattern.DocumentRange().ok() }
 }
 
 #[cfg(test)]
