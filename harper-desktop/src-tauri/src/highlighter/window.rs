@@ -156,23 +156,6 @@ impl Window {
         })
     }
 
-    /// Recreates the wgpu surface and its DirectComposition binding.
-    ///
-    /// After system resume the composition visual can detach silently:
-    /// rendering keeps succeeding with no error while nothing reaches the
-    /// screen. Rebinding through the same `set_window` call that created the
-    /// chain restores it.
-    #[cfg(target_os = "windows")]
-    pub fn rebind_surface(&mut self) {
-        if let Err(error) = pollster::block_on(
-            self.painter
-                .set_window(self.viewport_id, Some(self.inner.clone())),
-        ) {
-            eprintln!("failed to rebind overlay surface: {error}");
-        }
-        self.inner.request_redraw();
-    }
-
     /// Whether the OS reports this window as dark-themed.
     #[cfg(target_os = "windows")]
     pub fn is_dark(&self) -> bool {
