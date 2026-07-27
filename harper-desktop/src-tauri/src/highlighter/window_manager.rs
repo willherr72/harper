@@ -423,6 +423,7 @@ impl ApplicationHandler for WindowManagerApp {
                 tracing::warn!("resume detected; recreating overlay windows");
                 self.windows.clear();
                 self.create_windows(event_loop);
+                self.os_broker.on_resume();
                 self.scene_dirty = true;
             }
             self.last_tick = now;

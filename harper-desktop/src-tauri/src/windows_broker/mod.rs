@@ -7,6 +7,7 @@ mod offsets;
 mod rects;
 mod uia;
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -39,15 +40,22 @@ thread_local! {
     /// A thread local is also the more correct home for it: COM objects are
     /// apartment-affine and must not cross threads without marshalling, which
     /// this arrangement enforces structurally. COM is initialised lazily on
-    /// whichever thread first asks for boxes.
-    static AUTOMATION: Option<IUIAutomation> = unsafe {
+    /// whichever thread first asks for boxes, and replaceable so the client can
+    /// be rebuilt after a suspend it may not have survived.
+    static AUTOMATION: RefCell<Option<IUIAutomation>> = RefCell::new(create_automation());
+}
+
+/// Creates a UI Automation client on the calling thread.
+fn create_automation() -> Option<IUIAutomation> {
+    unsafe {
+        // Returns S_FALSE when the thread is already initialised, which is fine.
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let automation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok();
         if automation.is_none() {
-            eprintln!("WindowsBroker: could not create IUIAutomation; highlighting disabled");
+            tracing::warn!("could not create IUIAutomation; highlighting disabled");
         }
         automation
-    };
+    }
 }
 
 /// UI Automation-backed broker.
@@ -96,7 +104,8 @@ impl OsBroker for WindowsBroker {
             return Vec::new();
         }
 
-        let Some(pattern) = AUTOMATION.with(|a| a.as_ref().and_then(uia::focused_text_pattern))
+        let Some(pattern) =
+            AUTOMATION.with(|a| a.borrow().as_ref().and_then(uia::focused_text_pattern))
         else {
             return Vec::new();
         };
@@ -175,6 +184,16 @@ impl OsBroker for WindowsBroker {
         let mut point = POINT::default();
         unsafe { GetCursorPos(&mut point).ok()? };
         Some(egui::Pos2::new(point.x as f32, point.y as f32))
+    }
+
+    fn on_resume(&mut self) {
+        // The overlay's rendering stack is rebuilt on resume by the window
+        // manager, but a stale UI Automation client would fail the same way and
+        // look identical from outside: no focused element, no rectangles, no
+        // highlights, and no error — `focused_text_pattern` reports failure as
+        // `None`. Since the two cannot be told apart after the fact, the client
+        // is rebuilt too. Creating one is cheap and happens once per resume.
+        AUTOMATION.with(|a| *a.borrow_mut() = create_automation());
     }
 
     fn accessibility_permission_status(&self) -> AccessibilityPermissionStatus {
