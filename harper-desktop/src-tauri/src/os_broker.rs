@@ -26,6 +26,12 @@ pub trait OsBroker {
 
     fn cursor_position(&self) -> Option<egui::Pos2>;
 
+    /// Called once after the system resumes from suspend.
+    ///
+    /// Platform clients that do not survive suspend can be rebuilt here. A
+    /// broker whose clients are resume-safe needs to do nothing.
+    fn on_resume(&mut self) {}
+
     fn accessibility_permission_status(&self) -> AccessibilityPermissionStatus {
         AccessibilityPermissionStatus::Unsupported
     }
