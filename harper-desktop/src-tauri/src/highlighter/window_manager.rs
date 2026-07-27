@@ -289,6 +289,42 @@ impl WindowManagerApp {
         }
     }
 
+    /// Builds one overlay window per monitor, replacing whatever is there.
+    ///
+    /// Shared by first-run setup and by resume recovery so a rebuilt overlay is
+    /// constructed exactly like the original.
+    fn create_windows(&mut self, event_loop: &ActiveEventLoop) {
+        let monitors = event_loop.available_monitors().collect::<Vec<_>>();
+
+        if let Some(refresh_interval) = monitors.iter().filter_map(monitor_refresh_interval).min() {
+            self.read_interval = refresh_interval;
+        }
+
+        for monitor in monitors {
+            // Each overlay window gets its own egui context on Windows. Sharing
+            // one context across the per-monitor windows makes egui's texture
+            // deltas race between their independent wgpu renderers: the initial
+            // font-atlas allocation reaches only the first window to render, so
+            // a later atlas update delivered to another window panics in
+            // egui-wgpu with "Tried to update a texture that has not been
+            // allocated yet." Independent contexts route each window's texture
+            // deltas to its own renderer. macOS keeps the shared context.
+            #[cfg(target_os = "windows")]
+            let context = egui::Context::default();
+            #[cfg(not(target_os = "windows"))]
+            let context = self.context.clone();
+
+            match pollster::block_on(Window::new(event_loop, monitor, context)) {
+                Ok(window) => self.windows.push(window),
+                Err(error) => {
+                    self.error = Some(error);
+                    event_loop.exit();
+                    return;
+                }
+            }
+        }
+    }
+
     fn refresh_config(&mut self) {
         (self.refresh_config)();
     }
@@ -368,15 +404,25 @@ impl ApplicationHandler for WindowManagerApp {
 
         // A gap this large means the event loop was frozen — i.e. the system
         // was suspended. The DirectComposition visuals behind the overlay
-        // surfaces can detach across resume without any error, leaving every
-        // subsequent render presenting to nowhere; rebind them.
+        // surfaces can detach across resume without reporting any error: every
+        // later render presents successfully to nothing.
+        //
+        // Recreating just the surface does not help. `Painter::set_window` is
+        // a no-op once a surface is registered for the viewport, so an earlier
+        // attempt to rebind silently did nothing at all, and even clearing the
+        // surface first would leave the original instance and device in place.
+        // The overlay windows are therefore rebuilt outright — cheap at once
+        // per resume, and demonstrably fresh in every layer: HWND, instance,
+        // device, swapchain and composition visual.
         #[cfg(target_os = "windows")]
         {
             if now.duration_since(self.last_tick) > Duration::from_secs(30) {
-                eprintln!("resume detected; rebinding overlay surfaces");
-                for window in &mut self.windows {
-                    window.rebind_surface();
-                }
+                // warn, not info: the app's subscriber is capped at WARN, and a
+                // silent recovery event is exactly what made the previous
+                // failure so expensive to diagnose.
+                tracing::warn!("resume detected; recreating overlay windows");
+                self.windows.clear();
+                self.create_windows(event_loop);
                 self.scene_dirty = true;
             }
             self.last_tick = now;
@@ -404,35 +450,7 @@ impl ApplicationHandler for WindowManagerApp {
             return;
         }
 
-        let monitors = event_loop.available_monitors().collect::<Vec<_>>();
-
-        if let Some(refresh_interval) = monitors.iter().filter_map(monitor_refresh_interval).min() {
-            self.read_interval = refresh_interval;
-        }
-
-        for monitor in monitors {
-            // Each overlay window gets its own egui context on Windows. Sharing
-            // one context across the per-monitor windows makes egui's texture
-            // deltas race between their independent wgpu renderers: the initial
-            // font-atlas allocation reaches only the first window to render, so
-            // a later atlas update delivered to another window panics in
-            // egui-wgpu with "Tried to update a texture that has not been
-            // allocated yet." Independent contexts route each window's texture
-            // deltas to its own renderer. macOS keeps the shared context.
-            #[cfg(target_os = "windows")]
-            let context = egui::Context::default();
-            #[cfg(not(target_os = "windows"))]
-            let context = self.context.clone();
-
-            match pollster::block_on(Window::new(event_loop, monitor, context)) {
-                Ok(window) => self.windows.push(window),
-                Err(error) => {
-                    self.error = Some(error);
-                    event_loop.exit();
-                    return;
-                }
-            }
-        }
+        self.create_windows(event_loop);
     }
 
     fn window_event(
