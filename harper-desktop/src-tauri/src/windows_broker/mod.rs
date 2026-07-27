@@ -101,56 +101,70 @@ impl OsBroker for WindowsBroker {
             return Vec::new();
         };
 
+        // Lint the document as one text, from a single range.
+        //
+        // Providers return one visible range per *visual line*, so linting each
+        // range separately made every wrapped line look like the start of its
+        // own document — Harper flagged the first word of each line as needing
+        // a capital letter, and every other rule that depends on sentence
+        // position was equally misled. The whole document is also what the
+        // macOS broker lints, since it reads the element's entire value.
+        //
+        // Geometry is unaffected: each lint's rectangle still comes from a
+        // sub-range of this range, and a lint scrolled out of view yields no
+        // rectangles and is skipped.
+        let Some(range) = uia::document_range(&pattern) else {
+            return Vec::new();
+        };
+
+        let Ok(text) = (unsafe { range.GetText(MAX_RANGE_TEXT) }) else {
+            return Vec::new();
+        };
+        let text = text.to_string();
+        if text.is_empty() {
+            return Vec::new();
+        }
+
+        // The callback debounces and caches internally, so the broker must not
+        // add a debounce of its own.
+        let organized_lints = lint_text(&text);
+
         let mut collected = Vec::new();
 
-        for range in uia::visible_or_document_ranges(&pattern) {
-            let Ok(text) = (unsafe { range.GetText(MAX_RANGE_TEXT) }) else {
-                continue;
-            };
-            let text = text.to_string();
-            if text.is_empty() {
-                continue;
-            }
-
-            // The callback debounces and caches internally, so the broker must
-            // not add a debounce of its own.
-            let organized_lints = lint_text(&text);
-
-            for (rule_name, lints) in organized_lints {
-                for lint in lints {
-                    let start = offsets::char_to_utf16_offset(&text, lint.span.start);
-                    let end = offsets::char_to_utf16_offset(&text, lint.span.end);
-                    if end <= start {
-                        continue;
-                    }
-
-                    let Some(rect) = span_rect(&range, start, end) else {
-                        continue;
-                    };
-
-                    // Everything the apply closure needs, captured by value.
-                    // The COM range clone stays on this thread — the closure is
-                    // invoked from the same event loop that called get_boxes.
-                    let apply_range = range.clone();
-                    let apply_text = text.clone();
-                    let (span_start, span_end) = (lint.span.start, lint.span.end);
-
-                    collected.push(ActionableLint::new(
-                        rect,
-                        rule_name.clone(),
-                        lint,
-                        text.clone(),
-                        move |suggestion| {
-                            apply_suggestion_to_range(
-                                &apply_range,
-                                &apply_text,
-                                span_start,
-                                span_end,
-                                &suggestion,
-                            );
-                        },
-                    ));
+        for (rule_name, lints) in organized_lints {
+            for lint in lints {
+                let start = offsets::char_to_utf16_offset(&text, lint.span.start);
+                let end = offsets::char_to_utf16_offset(&text, lint.span.end);
+                if end <= start {
+                    continue;
                 }
+
+                let Some(rect) = span_rect(&range, start, end) else {
+                    continue;
+                };
+
+                // Everything the apply closure needs, captured by value. The
+                // COM range clone stays on this thread — the closure is invoked
+                // from the same event loop that called get_boxes.
+                let apply_range = range.clone();
+                let apply_text = text.clone();
+                let (span_start, span_end) = (lint.span.start, lint.span.end);
+
+                collected.push(ActionableLint::new(
+                    rect,
+                    rule_name.clone(),
+                    lint,
+                    text.clone(),
+                    move |suggestion| {
+                        apply_suggestion_to_range(
+                            &apply_range,
+                            &apply_text,
+                            span_start,
+                            span_end,
+                            &suggestion,
+                        );
+                    },
+                ));
             }
         }
 
