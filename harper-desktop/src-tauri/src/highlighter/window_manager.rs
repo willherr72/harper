@@ -150,6 +150,14 @@ struct WindowManagerApp {
     /// overlay surfaces need rebinding. Used on Windows only.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     last_tick: Instant,
+    /// When to (re)build the overlay windows, if a rebuild is pending. Used on
+    /// Windows only.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    rebuild_at: Option<Instant>,
+    /// Hash of the display layout the current overlay was built for. Used on
+    /// Windows only.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    monitor_signature: u64,
     error: Option<Error>,
 }
 
@@ -160,6 +168,12 @@ struct WindowManagerApp {
 /// Cursor hit-testing and rendering stay at full tick rate.
 #[cfg(target_os = "windows")]
 const READ_TICK_DIVIDER: u32 = 6;
+
+/// How long to wait after a resume before rebuilding the overlay, and how long
+/// to wait before retrying if that rebuild found no displays. Monitors do not
+/// necessarily come back at the same moment the event loop does.
+#[cfg(target_os = "windows")]
+const RESUME_SETTLE: Duration = Duration::from_secs(3);
 
 impl WindowManagerApp {
     /// Builds the mutable application state consumed by winit callbacks after `WindowManager` gives
@@ -194,6 +208,8 @@ impl WindowManagerApp {
             popup_was_open: false,
             last_heartbeat: Instant::now(),
             last_tick: Instant::now(),
+            rebuild_at: None,
+            monitor_signature: 0,
             error: None,
         }
     }
@@ -286,6 +302,27 @@ impl WindowManagerApp {
         #[cfg(not(target_os = "windows"))]
         for window in &self.windows {
             window.request_redraw();
+        }
+    }
+
+    /// Rebuilds the overlay, retrying later if no displays are available yet.
+    ///
+    /// Leaving the overlay with no windows is the one outcome that cannot
+    /// recover on its own during rendering, so an empty result reschedules
+    /// instead of being accepted.
+    #[cfg(target_os = "windows")]
+    fn rebuild_overlay(&mut self, event_loop: &ActiveEventLoop, now: Instant) {
+        self.windows.clear();
+        self.create_windows(event_loop);
+        self.scene_dirty = true;
+
+        if self.windows.is_empty() {
+            self.rebuild_at = Some(now + RESUME_SETTLE);
+            tracing::warn!("overlay rebuild found no displays; retrying shortly");
+        } else {
+            self.rebuild_at = None;
+            self.monitor_signature = monitor_signature(event_loop);
+            tracing::warn!(windows = self.windows.len(), "overlay rebuilt");
         }
     }
 
@@ -391,6 +428,29 @@ impl WindowManagerApp {
     }
 }
 
+/// Order-independent hash of every monitor's position and size.
+///
+/// Two layouts that would place the overlay windows identically produce the
+/// same value, so this changes exactly when the overlay needs rebuilding.
+#[cfg(target_os = "windows")]
+fn monitor_signature(event_loop: &ActiveEventLoop) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut layout: Vec<(i32, i32, u32, u32)> = event_loop
+        .available_monitors()
+        .map(|monitor| {
+            let position = monitor.position();
+            let size = monitor.size();
+            (position.x, position.y, size.width, size.height)
+        })
+        .collect();
+    layout.sort_unstable();
+
+    let mut hasher = std::hash::DefaultHasher::new();
+    layout.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn monitor_refresh_interval(monitor: &MonitorHandle) -> Option<Duration> {
     monitor
         .refresh_rate_millihertz()
@@ -420,13 +480,26 @@ impl ApplicationHandler for WindowManagerApp {
                 // warn, not info: the app's subscriber is capped at WARN, and a
                 // silent recovery event is exactly what made the previous
                 // failure so expensive to diagnose.
-                tracing::warn!("resume detected; recreating overlay windows");
-                self.windows.clear();
-                self.create_windows(event_loop);
+                tracing::warn!("resume detected; scheduling overlay rebuild");
+
+                // Deliberately deferred rather than immediate. The event loop
+                // resumes before the displays necessarily do, and rebuilding
+                // against an empty monitor list produces an overlay with no
+                // windows at all — which renders nothing, forever, without
+                // erroring. An immediate rebuild recovered a mid-day display
+                // sleep and never recovered an overnight suspend for exactly
+                // this reason.
+                self.rebuild_at = Some(now + RESUME_SETTLE);
+
+                // The automation client does not depend on displays, so it can
+                // be rebuilt straight away.
                 self.os_broker.on_resume();
-                self.scene_dirty = true;
             }
             self.last_tick = now;
+
+            if self.rebuild_at.is_some_and(|at| now >= at) {
+                self.rebuild_overlay(event_loop, now);
+            }
         }
 
         if now.duration_since(self.last_read) >= self.read_interval {
@@ -437,6 +510,35 @@ impl ApplicationHandler for WindowManagerApp {
         if now.duration_since(self.last_config_poll) >= CONFIG_POLL_INTERVAL {
             self.refresh_config();
             self.last_config_poll = now;
+
+            // Invariant: the overlay matches the current display layout.
+            //
+            // Checked once a second, which makes it self-healing for every way
+            // the displays can change underneath a running overlay: docking and
+            // undocking, a monitor plugged in or removed, a resolution or
+            // arrangement change, and a post-resume rebuild that ran before the
+            // displays came back and so produced too few windows, or none.
+            //
+            // Comparing the layout rather than just the count matters: swapping
+            // one display for another of a different size keeps the count
+            // identical while leaving every overlay window sized and positioned
+            // for a monitor that no longer exists — which renders nothing, with
+            // no error, exactly like the failures this replaces.
+            #[cfg(target_os = "windows")]
+            {
+                let signature = monitor_signature(event_loop);
+                let monitors = event_loop.available_monitors().count();
+                if self.rebuild_at.is_none()
+                    && (signature != self.monitor_signature || self.windows.len() != monitors)
+                {
+                    tracing::warn!(
+                        windows = self.windows.len(),
+                        monitors,
+                        "display layout changed; scheduling overlay rebuild"
+                    );
+                    self.rebuild_at = Some(now);
+                }
+            }
         }
 
         self.update_cursor_hittest(event_loop);
