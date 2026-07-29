@@ -40,8 +40,9 @@ thread_local! {
     /// A thread local is also the more correct home for it: COM objects are
     /// apartment-affine and must not cross threads without marshalling, which
     /// this arrangement enforces structurally. COM is initialised lazily on
-    /// whichever thread first asks for boxes, and replaceable so the client can
-    /// be rebuilt after a suspend it may not have survived.
+    /// whichever thread first asks for boxes. It stays replaceable: if a client
+    /// is ever observed going stale, rebuilding it is the remedy — but that has
+    /// not been seen, so nothing rebuilds it today.
     static AUTOMATION: RefCell<Option<IUIAutomation>> = RefCell::new(create_automation());
 }
 
@@ -184,16 +185,6 @@ impl OsBroker for WindowsBroker {
         let mut point = POINT::default();
         unsafe { GetCursorPos(&mut point).ok()? };
         Some(egui::Pos2::new(point.x as f32, point.y as f32))
-    }
-
-    fn on_resume(&mut self) {
-        // The overlay's rendering stack is rebuilt on resume by the window
-        // manager, but a stale UI Automation client would fail the same way and
-        // look identical from outside: no focused element, no rectangles, no
-        // highlights, and no error — `focused_text_pattern` reports failure as
-        // `None`. Since the two cannot be told apart after the fact, the client
-        // is rebuilt too. Creating one is cheap and happens once per resume.
-        AUTOMATION.with(|a| *a.borrow_mut() = create_automation());
     }
 
     fn accessibility_permission_status(&self) -> AccessibilityPermissionStatus {
