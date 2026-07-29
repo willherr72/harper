@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::monitor::MonitorHandle;
@@ -321,7 +322,7 @@ impl WindowManagerApp {
             tracing::warn!("overlay rebuild found no displays; retrying shortly");
         } else {
             self.rebuild_at = None;
-            self.monitor_signature = monitor_signature(event_loop);
+            self.monitor_signature = layout_signature(&readable_monitor_layout(event_loop));
             tracing::warn!(windows = self.windows.len(), "overlay rebuilt");
         }
     }
@@ -351,7 +352,13 @@ impl WindowManagerApp {
             #[cfg(not(target_os = "windows"))]
             let context = self.context.clone();
 
-            match pollster::block_on(Window::new(event_loop, monitor, context)) {
+            let Some((position, size)) = monitor_geometry(&monitor) else {
+                // The handle went invalid while the displays were changing. The
+                // layout check will see the shortfall and rebuild again.
+                continue;
+            };
+
+            match pollster::block_on(Window::new(event_loop, position, size, context)) {
                 Ok(window) => self.windows.push(window),
                 Err(error) => {
                     self.error = Some(error);
@@ -428,23 +435,65 @@ impl WindowManagerApp {
     }
 }
 
-/// Order-independent hash of every monitor's position and size.
+/// A monitor's position and size, or `None` if its handle is no longer valid.
+///
+/// Deliberately avoids `MonitorHandle::size()`, which unwraps `GetMonitorInfoW`
+/// internally: a handle invalidated by a display reconfiguration aborts the
+/// process. Since the overlay enumerates monitors every second precisely so it
+/// can react to reconfiguration, it reads them at the worst possible moment,
+/// and a docking station took the highlighter down overnight exactly this way.
+/// A monitor that cannot be read is skipped and picked up on a later pass.
+#[cfg(target_os = "windows")]
+fn monitor_geometry(monitor: &MonitorHandle) -> Option<(PhysicalPosition<i32>, PhysicalSize<u32>)> {
+    use std::mem::size_of;
+
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
+    use winit::platform::windows::MonitorHandleExtWindows;
+
+    let handle = HMONITOR(monitor.hmonitor() as _);
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+
+    // Returns FALSE for a handle that has gone away; that is the case this
+    // whole function exists to survive.
+    if !unsafe { GetMonitorInfoW(handle, &mut info) }.as_bool() {
+        return None;
+    }
+
+    let rect = info.rcMonitor;
+    Some((
+        PhysicalPosition::new(rect.left, rect.top),
+        PhysicalSize::new(
+            (rect.right - rect.left).max(0) as u32,
+            (rect.bottom - rect.top).max(0) as u32,
+        ),
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn monitor_geometry(monitor: &MonitorHandle) -> Option<(PhysicalPosition<i32>, PhysicalSize<u32>)> {
+    Some((monitor.position(), monitor.size()))
+}
+
+/// Geometry of every monitor the overlay can currently build a window for.
+fn readable_monitor_layout(event_loop: &ActiveEventLoop) -> Vec<(i32, i32, u32, u32)> {
+    let mut layout: Vec<(i32, i32, u32, u32)> = event_loop
+        .available_monitors()
+        .filter_map(|monitor| monitor_geometry(&monitor))
+        .map(|(position, size)| (position.x, position.y, size.width, size.height))
+        .collect();
+    layout.sort_unstable();
+    layout
+}
+
+/// Order-independent hash of the readable display layout.
 ///
 /// Two layouts that would place the overlay windows identically produce the
 /// same value, so this changes exactly when the overlay needs rebuilding.
-#[cfg(target_os = "windows")]
-fn monitor_signature(event_loop: &ActiveEventLoop) -> u64 {
+fn layout_signature(layout: &[(i32, i32, u32, u32)]) -> u64 {
     use std::hash::{Hash, Hasher};
-
-    let mut layout: Vec<(i32, i32, u32, u32)> = event_loop
-        .available_monitors()
-        .map(|monitor| {
-            let position = monitor.position();
-            let size = monitor.size();
-            (position.x, position.y, size.width, size.height)
-        })
-        .collect();
-    layout.sort_unstable();
 
     let mut hasher = std::hash::DefaultHasher::new();
     layout.hash(&mut hasher);
@@ -526,14 +575,18 @@ impl ApplicationHandler for WindowManagerApp {
             // no error, exactly like the failures this replaces.
             #[cfg(target_os = "windows")]
             {
-                let signature = monitor_signature(event_loop);
-                let monitors = event_loop.available_monitors().count();
+                // Counted over monitors whose geometry is readable, which is
+                // exactly the set a rebuild can produce windows for, so a
+                // monitor that is briefly unreadable does not cause an endless
+                // rebuild loop.
+                let layout = readable_monitor_layout(event_loop);
+                let signature = layout_signature(&layout);
                 if self.rebuild_at.is_none()
-                    && (signature != self.monitor_signature || self.windows.len() != monitors)
+                    && (signature != self.monitor_signature || self.windows.len() != layout.len())
                 {
                     tracing::warn!(
                         windows = self.windows.len(),
-                        monitors,
+                        monitors = layout.len(),
                         "display layout changed; scheduling overlay rebuild"
                     );
                     self.rebuild_at = Some(now);

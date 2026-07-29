@@ -5,9 +5,20 @@ use crate::config::Config;
 use highlighter_worker::HighlighterWorker;
 use std::{
     io,
-    sync::{Arc, Mutex as StdMutex},
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
+
+/// Backoff state for restarting a highlighter that exited unexpectedly.
+#[derive(Default)]
+struct RestartState {
+    attempts: u32,
+    next_attempt_at: Option<Instant>,
+}
 
 /// Wraps around a [`HighlighterWorker`] and turns it into a service that is easier to manage.
 /// We can start and stop it and simply provide a shared `Config` object that we can update whenever.
@@ -15,6 +26,10 @@ use tokio::sync::Mutex;
 pub struct HighlighterService {
     config: Arc<Mutex<Config>>,
     worker: StdMutex<Option<HighlighterWorker>>,
+    /// Whether the highlighter is meant to be running, so an unexpected exit
+    /// can be told apart from a deliberate stop.
+    should_run: AtomicBool,
+    restart: StdMutex<RestartState>,
 }
 
 impl HighlighterService {
@@ -25,11 +40,52 @@ impl HighlighterService {
         Self {
             config,
             worker: StdMutex::new(None),
+            should_run: AtomicBool::new(false),
+            restart: StdMutex::new(RestartState::default()),
+        }
+    }
+
+    /// Restarts the highlighter if it exited without being asked to.
+    ///
+    /// The highlighter is a separate process, so a panic in it — a display
+    /// reconfiguration invalidating a monitor handle, a driver fault — takes
+    /// highlighting away silently, leaving only a stopped tray icon that the
+    /// user has to notice. Restart attempts back off so a highlighter that
+    /// cannot start does not spin.
+    pub fn ensure_running(&self) {
+        if !self.should_run.load(Ordering::Relaxed) || self.is_running() {
+            if self.should_run.load(Ordering::Relaxed) {
+                *self
+                    .restart
+                    .lock()
+                    .expect("highlighter restart lock poisoned") = RestartState::default();
+            }
+            return;
+        }
+
+        {
+            let mut restart = self
+                .restart
+                .lock()
+                .expect("highlighter restart lock poisoned");
+            let now = Instant::now();
+            if restart.next_attempt_at.is_some_and(|at| now < at) {
+                return;
+            }
+            restart.attempts = restart.attempts.saturating_add(1);
+            let backoff = Duration::from_secs(1 << restart.attempts.min(6));
+            restart.next_attempt_at = Some(now + backoff);
+        }
+
+        tracing::warn!("highlighter is not running; restarting it");
+        if let Err(error) = self.start() {
+            tracing::error!("could not restart the highlighter: {error}");
         }
     }
 
     /// Starts the highlighter worker if it is not already running.
     pub fn start(&self) -> io::Result<bool> {
+        self.should_run.store(true, Ordering::Relaxed);
         self.reap_finished_worker();
 
         let mut worker = self
@@ -47,6 +103,9 @@ impl HighlighterService {
 
     /// Stops the highlighter worker if one is running.
     pub fn stop(&self) -> bool {
+        // Deliberate stop: do not let the supervisor undo it.
+        self.should_run.store(false, Ordering::Relaxed);
+
         let worker = self
             .worker
             .lock()

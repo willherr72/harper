@@ -8,7 +8,6 @@ use egui_wgpu::{RendererOptions, WgpuConfiguration, WgpuSetup};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
-use winit::monitor::MonitorHandle;
 use winit::window::{Window as WinitWindow, WindowButtons, WindowId, WindowLevel};
 
 use super::Error;
@@ -56,13 +55,17 @@ pub struct Window {
 }
 
 impl Window {
+    /// Creates the overlay for one monitor.
+    ///
+    /// Geometry is passed in rather than read from a `MonitorHandle`, because
+    /// `MonitorHandle::size()` unwraps `GetMonitorInfoW` internally and a handle
+    /// invalidated by a display reconfiguration aborts the process.
     pub async fn new(
         event_loop: &ActiveEventLoop,
-        monitor: MonitorHandle,
+        position: PhysicalPosition<i32>,
+        size: PhysicalSize<u32>,
         context: egui::Context,
     ) -> Result<Self, Error> {
-        let position = monitor.position();
-        let size = monitor.size();
         let attributes = WinitWindow::default_attributes()
             .with_title("Harper")
             .with_inner_size(size)
@@ -96,8 +99,8 @@ impl Window {
         #[cfg(target_os = "windows")]
         apply_no_activate(&window);
 
-        window.set_outer_position(PhysicalPosition::new(position.x, position.y));
-        let _ = window.request_inner_size(PhysicalSize::new(size.width, size.height));
+        window.set_outer_position(position);
+        let _ = window.request_inner_size(size);
         window.set_cursor_hittest(false)?;
         let viewport_id = egui::ViewportId::from_hash_of(window.id());
 

@@ -82,6 +82,20 @@ fn platform_broker() -> PlatformBroker {
     PlatformBroker::default()
 }
 
+/// Watches the highlighter and restarts it if it exits on its own.
+///
+/// Highlighting runs in a separate process, so a crash there leaves the rest of
+/// Harper looking healthy while doing nothing — the only outward sign is the
+/// tray icon's status stripe, which is easy to miss for hours.
+fn supervise_highlighter_service(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            app.state::<HighlighterService>().ensure_running();
+        }
+    });
+}
+
 fn warm_app_search_cache(app: tauri::AppHandle) {
     tauri::async_runtime::spawn_blocking(move || {
         let broker = app.state::<StdMutex<PlatformBroker>>();
@@ -186,6 +200,7 @@ pub fn run_tauri() {
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
 
             set_up_tray_menu(app.handle())?;
+            supervise_highlighter_service(app.handle().clone());
             warm_app_search_cache(app.handle().clone());
 
             if is_first_launch {
