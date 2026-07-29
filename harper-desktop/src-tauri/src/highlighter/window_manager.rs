@@ -140,17 +140,6 @@ struct WindowManagerApp {
     /// the card closes. Used on Windows only.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     popup_was_open: bool,
-    /// Last unconditional repaint. The change-driven render skip means a GPU
-    /// surface invalidated by display sleep would otherwise stay blank until
-    /// the scene next changes; a low-frequency heartbeat restores the
-    /// self-healing the old every-tick render provided. Used on Windows only.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    last_heartbeat: Instant,
-    /// Last event-loop tick, used to detect system suspend: the loop cannot
-    /// tick through sleep, so a large gap means the machine resumed and the
-    /// overlay surfaces need rebinding. Used on Windows only.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    last_tick: Instant,
     /// When to (re)build the overlay windows, if a rebuild is pending. Used on
     /// Windows only.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -170,11 +159,10 @@ struct WindowManagerApp {
 #[cfg(target_os = "windows")]
 const READ_TICK_DIVIDER: u32 = 6;
 
-/// How long to wait after a resume before rebuilding the overlay, and how long
-/// to wait before retrying if that rebuild found no displays. Monitors do not
-/// necessarily come back at the same moment the event loop does.
+/// How long to wait before retrying a rebuild that found no usable displays.
+/// Monitors do not all come back at the same instant during a reconfiguration.
 #[cfg(target_os = "windows")]
-const RESUME_SETTLE: Duration = Duration::from_secs(3);
+const REBUILD_RETRY_DELAY: Duration = Duration::from_secs(3);
 
 impl WindowManagerApp {
     /// Builds the mutable application state consumed by winit callbacks after `WindowManager` gives
@@ -207,8 +195,6 @@ impl WindowManagerApp {
             scene_signature: 0,
             scene_dirty: true,
             popup_was_open: false,
-            last_heartbeat: Instant::now(),
-            last_tick: Instant::now(),
             rebuild_at: None,
             monitor_signature: 0,
             error: None,
@@ -282,12 +268,6 @@ impl WindowManagerApp {
             // card mutates popup state *during* that frame's render, so one
             // more paint is needed afterwards to clear the card from screen.
             let popup_open = self.render_state.popup_open();
-
-            if self.last_heartbeat.elapsed() >= Duration::from_secs(5) {
-                self.last_heartbeat = Instant::now();
-                self.scene_dirty = true;
-            }
-
             let render_needed = self.scene_dirty || popup_open || self.popup_was_open;
             if render_needed {
                 let dark = self.windows.first().is_some_and(Window::is_dark);
@@ -318,7 +298,7 @@ impl WindowManagerApp {
         self.scene_dirty = true;
 
         if self.windows.is_empty() {
-            self.rebuild_at = Some(now + RESUME_SETTLE);
+            self.rebuild_at = Some(now + REBUILD_RETRY_DELAY);
             tracing::warn!("overlay rebuild found no displays; retrying shortly");
         } else {
             self.rebuild_at = None;
@@ -511,44 +491,9 @@ impl ApplicationHandler for WindowManagerApp {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
 
-        // A gap this large means the event loop was frozen — i.e. the system
-        // was suspended. The DirectComposition visuals behind the overlay
-        // surfaces can detach across resume without reporting any error: every
-        // later render presents successfully to nothing.
-        //
-        // Recreating just the surface does not help. `Painter::set_window` is
-        // a no-op once a surface is registered for the viewport, so an earlier
-        // attempt to rebind silently did nothing at all, and even clearing the
-        // surface first would leave the original instance and device in place.
-        // The overlay windows are therefore rebuilt outright — cheap at once
-        // per resume, and demonstrably fresh in every layer: HWND, instance,
-        // device, swapchain and composition visual.
         #[cfg(target_os = "windows")]
-        {
-            if now.duration_since(self.last_tick) > Duration::from_secs(30) {
-                // warn, not info: the app's subscriber is capped at WARN, and a
-                // silent recovery event is exactly what made the previous
-                // failure so expensive to diagnose.
-                tracing::warn!("resume detected; scheduling overlay rebuild");
-
-                // Deliberately deferred rather than immediate. The event loop
-                // resumes before the displays necessarily do, and rebuilding
-                // against an empty monitor list produces an overlay with no
-                // windows at all — which renders nothing, forever, without
-                // erroring. An immediate rebuild recovered a mid-day display
-                // sleep and never recovered an overnight suspend for exactly
-                // this reason.
-                self.rebuild_at = Some(now + RESUME_SETTLE);
-
-                // The automation client does not depend on displays, so it can
-                // be rebuilt straight away.
-                self.os_broker.on_resume();
-            }
-            self.last_tick = now;
-
-            if self.rebuild_at.is_some_and(|at| now >= at) {
-                self.rebuild_overlay(event_loop, now);
-            }
+        if self.rebuild_at.is_some_and(|at| now >= at) {
+            self.rebuild_overlay(event_loop, now);
         }
 
         if now.duration_since(self.last_read) >= self.read_interval {
@@ -624,17 +569,6 @@ impl ApplicationHandler for WindowManagerApp {
             }
         );
         let should_render = matches!(&event, WindowEvent::RedrawRequested);
-
-        // Display wake, occlusion change, and focus change can all follow a
-        // period in which the surface was invalidated; repaint promptly rather
-        // than waiting for the heartbeat.
-        #[cfg(target_os = "windows")]
-        if matches!(
-            &event,
-            WindowEvent::Occluded(_) | WindowEvent::Focused(_) | WindowEvent::Moved(_)
-        ) {
-            self.scene_dirty = true;
-        }
 
         if let Some(window) = self
             .windows
