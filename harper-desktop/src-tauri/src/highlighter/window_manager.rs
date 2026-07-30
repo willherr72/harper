@@ -130,10 +130,12 @@ struct WindowManagerApp {
     /// divider of the render cadence. Used on Windows only.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     read_tick: u32,
-    /// Hash of the last scene handed to the renderer, plus a dirty flag, so
-    /// identical frames are not re-rendered. Used on Windows only.
+    /// Hash of the scene currently on screen, so identical frames are not
+    /// re-rendered. `None` means nothing is known to be drawn — after an
+    /// overlay rebuild, for instance — and the next scene must be rendered
+    /// whatever it hashes to. Used on Windows only.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    scene_signature: u64,
+    scene_signature: Option<u64>,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     scene_dirty: bool,
     /// Popup visibility on the previous tick, to schedule the erase frame when
@@ -192,7 +194,7 @@ impl WindowManagerApp {
             hovered_lint: None,
             cursor_hittest_enabled: false,
             read_tick: 0,
-            scene_signature: 0,
+            scene_signature: None,
             scene_dirty: true,
             popup_was_open: false,
             rebuild_at: None,
@@ -240,8 +242,8 @@ impl WindowManagerApp {
             #[cfg(target_os = "windows")]
             {
                 let signature = Self::scene_signature_of(&rects);
-                if signature != self.scene_signature {
-                    self.scene_signature = signature;
+                if self.scene_signature != Some(signature) {
+                    self.scene_signature = Some(signature);
                     self.scene_dirty = true;
                 }
             }
@@ -272,10 +274,15 @@ impl WindowManagerApp {
             if render_needed {
                 let dark = self.windows.first().is_some_and(Window::is_dark);
                 self.render_state.set_dark(dark);
+                // egui asks for another frame when one was not enough — the
+                // first frames after a context is created, and while widgets
+                // animate. Honouring that is what a timer-based repaint stood
+                // in for.
+                let mut wants_another_frame = false;
                 for window in &mut self.windows {
-                    window.render(&mut self.render_state);
+                    wants_another_frame |= window.render(&mut self.render_state);
                 }
-                self.scene_dirty = false;
+                self.scene_dirty = wants_another_frame;
             }
             self.popup_was_open = self.render_state.popup_open();
         }
@@ -295,6 +302,13 @@ impl WindowManagerApp {
     fn rebuild_overlay(&mut self, event_loop: &ActiveEventLoop, now: Instant) {
         self.windows.clear();
         self.create_windows(event_loop);
+
+        // Nothing is on screen now, so the cached scene hash no longer
+        // describes reality and must not suppress the next render. Returning
+        // to unchanged text — the same document, the same window position, the
+        // same rectangles — hashes identically, and the overlay stayed blank
+        // until something happened to move.
+        self.scene_signature = None;
         self.scene_dirty = true;
 
         if self.windows.is_empty() {
