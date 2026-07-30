@@ -301,7 +301,10 @@ impl WindowManagerApp {
     #[cfg(target_os = "windows")]
     fn rebuild_overlay(&mut self, event_loop: &ActiveEventLoop, now: Instant) {
         self.windows.clear();
-        self.create_windows(event_loop);
+        let outcome = self.create_windows(event_loop);
+        if let Err(error) = &outcome {
+            tracing::warn!(%error, "overlay rebuild could not create a window");
+        }
 
         // Nothing is on screen now, so the cached scene hash no longer
         // describes reality and must not suppress the next render. Returning
@@ -311,13 +314,15 @@ impl WindowManagerApp {
         self.scene_signature = None;
         self.scene_dirty = true;
 
-        if self.windows.is_empty() {
-            self.rebuild_at = Some(now + REBUILD_RETRY_DELAY);
-            tracing::warn!("overlay rebuild found no displays; retrying shortly");
-        } else {
+        if outcome.is_ok() && !self.windows.is_empty() {
             self.rebuild_at = None;
-            self.monitor_signature = layout_signature(&readable_monitor_layout(event_loop));
             tracing::warn!(windows = self.windows.len(), "overlay rebuilt");
+        } else {
+            self.rebuild_at = Some(now + REBUILD_RETRY_DELAY);
+            tracing::warn!(
+                windows = self.windows.len(),
+                "overlay rebuild incomplete; retrying shortly"
+            );
         }
     }
 
@@ -325,8 +330,14 @@ impl WindowManagerApp {
     ///
     /// Shared by first-run setup and by resume recovery so a rebuilt overlay is
     /// constructed exactly like the original.
-    fn create_windows(&mut self, event_loop: &ActiveEventLoop) {
+    fn create_windows(&mut self, event_loop: &ActiveEventLoop) -> Result<(), Error> {
         let monitors = event_loop.available_monitors().collect::<Vec<_>>();
+
+        // Replacement windows are all created click-through, so the cached
+        // hit-test state no longer describes any live window. Left set, the
+        // early return in update_cursor_hittest would decide there was nothing
+        // to do and highlights would stop responding to clicks.
+        self.cursor_hittest_enabled = false;
 
         if let Some(refresh_interval) = monitors.iter().filter_map(monitor_refresh_interval).min() {
             self.read_interval = refresh_interval;
@@ -352,15 +363,22 @@ impl WindowManagerApp {
                 continue;
             };
 
-            match pollster::block_on(Window::new(event_loop, position, size, context)) {
-                Ok(window) => self.windows.push(window),
-                Err(error) => {
-                    self.error = Some(error);
-                    event_loop.exit();
-                    return;
-                }
-            }
+            // Propagated rather than fatal: during a display reconfiguration a
+            // failure here is transient and the caller can retry. Only the
+            // first-run caller treats it as unrecoverable.
+            self.windows.push(pollster::block_on(Window::new(
+                event_loop, position, size, context,
+            ))?);
         }
+
+        // Record the layout these windows were built for, so the invariant does
+        // not immediately declare a change and rebuild them again.
+        #[cfg(target_os = "windows")]
+        {
+            self.monitor_signature = layout_signature(&readable_monitor_layout(event_loop));
+        }
+
+        Ok(())
     }
 
     fn refresh_config(&mut self) {
@@ -472,6 +490,7 @@ fn monitor_geometry(monitor: &MonitorHandle) -> Option<(PhysicalPosition<i32>, P
 }
 
 /// Geometry of every monitor the overlay can currently build a window for.
+#[cfg(target_os = "windows")]
 fn readable_monitor_layout(event_loop: &ActiveEventLoop) -> Vec<(i32, i32, u32, u32)> {
     let mut layout: Vec<(i32, i32, u32, u32)> = event_loop
         .available_monitors()
@@ -486,6 +505,7 @@ fn readable_monitor_layout(event_loop: &ActiveEventLoop) -> Vec<(i32, i32, u32, 
 ///
 /// Two layouts that would place the overlay windows identically produce the
 /// same value, so this changes exactly when the overlay needs rebuilding.
+#[cfg(target_os = "windows")]
 fn layout_signature(layout: &[(i32, i32, u32, u32)]) -> u64 {
     use std::hash::{Hash, Hasher};
 
@@ -565,7 +585,11 @@ impl ApplicationHandler for WindowManagerApp {
             return;
         }
 
-        self.create_windows(event_loop);
+        // Failing on first run is fatal: there is nothing yet to fall back to.
+        if let Err(error) = self.create_windows(event_loop) {
+            self.error = Some(error);
+            event_loop.exit();
+        }
     }
 
     fn window_event(
