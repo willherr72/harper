@@ -5,7 +5,8 @@
 
 use windows::Win32::System::Com::SAFEARRAY;
 use windows::Win32::System::Ole::{
-    SafeArrayAccessData, SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayUnaccessData,
+    SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetLBound, SafeArrayGetUBound,
+    SafeArrayUnaccessData,
 };
 use windows::Win32::UI::Accessibility::{
     IUIAutomation, IUIAutomationTextPattern, IUIAutomationTextRange, IUIAutomationValuePattern,
@@ -13,15 +14,33 @@ use windows::Win32::UI::Accessibility::{
 };
 use windows::core::Interface;
 
-/// Reads a SAFEARRAY of f64 into a Vec.
+/// Reads a SAFEARRAY of f64 into a Vec, taking ownership of the array.
 ///
-/// Returns an empty Vec on any failure. A malformed array from one application
-/// must not panic the highlighter.
+/// COM hands the caller an owned array, so this frees it on every path — the
+/// alternative leaks one array per lint per read, which is roughly ten a second
+/// while an editable field has focus. Returns an empty Vec on any failure: a
+/// malformed array from one application must not panic the highlighter.
 pub fn safearray_to_f64(psa: *mut SAFEARRAY) -> Vec<f64> {
     if psa.is_null() {
         return Vec::new();
     }
 
+    let values = unsafe { read_f64_elements(psa) };
+
+    // Must follow SafeArrayUnaccessData, which read_f64_elements guarantees:
+    // destroying a locked array fails.
+    unsafe {
+        let _ = SafeArrayDestroy(psa);
+    }
+
+    values
+}
+
+/// Copies the elements out of a locked SAFEARRAY.
+///
+/// # Safety
+/// `psa` must be a valid, non-null SAFEARRAY of `f64`.
+unsafe fn read_f64_elements(psa: *mut SAFEARRAY) -> Vec<f64> {
     unsafe {
         let lower = SafeArrayGetLBound(psa, 1).unwrap_or(0);
         let upper = SafeArrayGetUBound(psa, 1).unwrap_or(-1);

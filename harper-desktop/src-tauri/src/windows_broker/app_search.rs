@@ -15,8 +15,8 @@ use std::collections::BTreeSet;
 
 use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_ENUMERATE_SUB_KEYS, RegCloseKey,
-    RegEnumKeyExW, RegOpenKeyExW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE,
+    RRF_RT_REG_SZ, RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible,
@@ -114,7 +114,7 @@ fn collect_app_paths(root: HKEY, executables: &mut BTreeSet<String>) {
             root,
             w!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"),
             None,
-            KEY_ENUMERATE_SUB_KEYS,
+            KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE,
             &mut key,
         )
         .is_err()
@@ -142,13 +142,61 @@ fn collect_app_paths(root: HKEY, executables: &mut BTreeSet<String>) {
             }
             index += 1;
 
-            let sub_key = String::from_utf16_lossy(&name[..name_len as usize]).to_lowercase();
-            if sub_key.ends_with(".exe") {
-                executables.insert(sub_key);
+            let sub_key = String::from_utf16_lossy(&name[..name_len as usize]);
+
+            // A subkey name is a launch alias, which is usually the executable's
+            // file name but does not have to be. The key's default value holds
+            // the real path, and the allowlist is keyed by file name, so an
+            // alias that differs would never match a foreground process.
+            let executable = default_value_file_name(key, &name[..name_len as usize])
+                .unwrap_or_else(|| sub_key.to_lowercase());
+
+            if executable.ends_with(".exe") {
+                executables.insert(executable);
             }
         }
 
         let _ = RegCloseKey(key);
+    }
+}
+
+/// File name from an App Paths subkey's default value, lowercased.
+///
+/// `None` when the key has no default value, which is legal — the caller falls
+/// back to the subkey name.
+fn default_value_file_name(parent: HKEY, subkey_utf16: &[u16]) -> Option<String> {
+    unsafe {
+        let mut subkey: Vec<u16> = subkey_utf16.to_vec();
+        subkey.push(0);
+
+        let mut buffer = [0u16; 512];
+        let mut size = std::mem::size_of_val(&buffer) as u32;
+
+        RegGetValueW(
+            parent,
+            windows::core::PCWSTR(subkey.as_ptr()),
+            None,
+            RRF_RT_REG_SZ,
+            None,
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+        .is_ok()
+        .then_some(())?;
+
+        // size is in bytes and includes the terminator.
+        let len = (size as usize / 2).saturating_sub(1).min(buffer.len());
+        let path = String::from_utf16_lossy(&buffer[..len]);
+        let trimmed = path.trim().trim_matches('"');
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        trimmed
+            .rsplit(['\\', '/'])
+            .next()
+            .map(|name| name.to_lowercase())
+            .filter(|name| !name.is_empty())
     }
 }
 

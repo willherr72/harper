@@ -7,14 +7,13 @@ mod offsets;
 mod rects;
 mod uia;
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use harper_core::linting::Lint;
-use windows::Win32::Foundation::POINT;
+use windows::Win32::Foundation::{POINT, RPC_E_CHANGED_MODE};
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationTextRange, TextPatternRangeEndpoint_End,
@@ -40,17 +39,30 @@ thread_local! {
     /// A thread local is also the more correct home for it: COM objects are
     /// apartment-affine and must not cross threads without marshalling, which
     /// this arrangement enforces structurally. COM is initialised lazily on
-    /// whichever thread first asks for boxes. It stays replaceable: if a client
-    /// is ever observed going stale, rebuilding it is the remedy — but that has
-    /// not been seen, so nothing rebuilds it today.
-    static AUTOMATION: RefCell<Option<IUIAutomation>> = RefCell::new(create_automation());
+    /// whichever thread first asks for boxes.
+    static AUTOMATION: Option<IUIAutomation> = create_automation();
 }
 
 /// Creates a UI Automation client on the calling thread.
 fn create_automation() -> Option<IUIAutomation> {
     unsafe {
-        // Returns S_FALSE when the thread is already initialised, which is fine.
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        // Apartment-threaded to agree with winit, which initialises this thread
+        // as an STA when it creates a window. Asking for MTA fails with
+        // RPC_E_CHANGED_MODE once a window exists, and — worse — succeeds when
+        // the broker happens to run first, which then makes winit's own
+        // initialisation fail on the next window it creates. That ordering is
+        // reachable: a start with no readable displays polls the broker before
+        // any window exists.
+        //
+        // S_FALSE means the thread was already initialised this way, and
+        // RPC_E_CHANGED_MODE means someone got there first with a different
+        // model; the interface still works in both cases.
+        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        if hr.is_err() && hr != RPC_E_CHANGED_MODE {
+            tracing::warn!(?hr, "CoInitializeEx failed; highlighting disabled");
+            return None;
+        }
+
         let automation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok();
         if automation.is_none() {
             tracing::warn!("could not create IUIAutomation; highlighting disabled");
@@ -97,7 +109,7 @@ impl OsBroker for WindowsBroker {
         let integration_enabled = match self.integrations.lock() {
             Ok(integrations) => Integration::is_integration_enabled_in(&integrations, &executable),
             Err(error) => {
-                eprintln!("Unable to read integrations: {error}");
+                tracing::warn!(%error, "unable to read integrations");
                 false
             }
         };
@@ -105,8 +117,7 @@ impl OsBroker for WindowsBroker {
             return Vec::new();
         }
 
-        let Some(pattern) =
-            AUTOMATION.with(|a| a.borrow().as_ref().and_then(uia::focused_text_pattern))
+        let Some(pattern) = AUTOMATION.with(|a| a.as_ref().and_then(uia::focused_text_pattern))
         else {
             return Vec::new();
         };
@@ -139,12 +150,21 @@ impl OsBroker for WindowsBroker {
         // add a debounce of its own.
         let organized_lints = lint_text(&text);
 
+        // One cumulative UTF-16 offset per character boundary, built once.
+        // Converting each lint's span independently rescans the document from
+        // the start, which is quadratic in the number of lints on a long one.
+        let utf16_offsets = offsets::utf16_offset_table(&text);
+
+        // Shared with every lint's apply closure so the document is not cloned
+        // per lint. `ActionableLint` still owns a copy for its own use.
+        let shared_text: Arc<str> = Arc::from(text.as_str());
+
         let mut collected = Vec::new();
 
         for (rule_name, lints) in organized_lints {
             for lint in lints {
-                let start = offsets::char_to_utf16_offset(&text, lint.span.start);
-                let end = offsets::char_to_utf16_offset(&text, lint.span.end);
+                let start = offsets::lookup(&utf16_offsets, lint.span.start);
+                let end = offsets::lookup(&utf16_offsets, lint.span.end);
                 if end <= start {
                     continue;
                 }
@@ -157,7 +177,7 @@ impl OsBroker for WindowsBroker {
                 // COM range clone stays on this thread — the closure is invoked
                 // from the same event loop that called get_boxes.
                 let apply_range = range.clone();
-                let apply_text = text.clone();
+                let apply_text = Arc::clone(&shared_text);
                 let (span_start, span_end) = (lint.span.start, lint.span.end);
 
                 collected.push(ActionableLint::new(
@@ -295,6 +315,7 @@ impl OsBroker for WindowsBroker {
 /// Applies a suggestion by selecting the lint's sub-range and typing the
 /// replacement.
 ///
+///
 /// The user's click never activated the overlay (`WS_EX_NOACTIVATE`), so the
 /// text field still has keyboard focus and synthesized input lands in it.
 fn apply_suggestion_to_range(
@@ -306,19 +327,46 @@ fn apply_suggestion_to_range(
 ) {
     let span = harper_core::Span::new(span_start, span_end);
     let Some(replacement) = apply::replacement_for(text, span, suggestion) else {
-        eprintln!("suggestion no longer fits the captured text; not applying");
+        tracing::warn!("suggestion no longer fits the captured text; not applying");
         return;
     };
 
     let start = offsets::char_to_utf16_offset(text, span_start);
     let end = offsets::char_to_utf16_offset(text, span_end);
     let Some(sub) = sub_range(range, start, end) else {
-        eprintln!("could not rebuild the lint's text range; not applying");
+        tracing::warn!("could not rebuild the lint's text range; not applying");
         return;
     };
 
+    // The snapshot this lint was computed from may be stale by the time the
+    // user clicks: they can type between the highlight appearing and the
+    // suggestion being chosen. Selecting and typing over a range that has since
+    // moved would edit the wrong characters, so confirm the range still holds
+    // what the lint was about. This also catches any provider whose
+    // TextUnit_Character is not one UTF-16 code unit.
+    let expected: String = text
+        .chars()
+        .skip(span_start)
+        .take(span_end.saturating_sub(span_start))
+        .collect();
+    match unsafe { sub.GetText(-1) } {
+        Ok(actual) if actual == expected => {}
+        Ok(actual) => {
+            tracing::warn!(
+                expected = %expected,
+                found = %actual,
+                "text changed since the lint was computed; not applying"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not read the lint's text range; not applying");
+            return;
+        }
+    }
+
     if let Err(error) = unsafe { sub.Select() } {
-        eprintln!("could not select the lint's text range: {error}");
+        tracing::warn!(%error, "could not select the lint's text range");
         return;
     }
 
@@ -346,10 +394,26 @@ fn sub_range(
         // Start pass End: moving Start first would drag End along with it, and
         // the later End move would then start from `start` and land at
         // `start + end`. Moving End out first keeps Start behind it throughout.
-        sub.MoveEndpointByUnit(TextPatternRangeEndpoint_End, TextUnit_Character, end)
-            .ok()?;
-        sub.MoveEndpointByUnit(TextPatternRangeEndpoint_Start, TextUnit_Character, start)
-            .ok()?;
+        //
+        // The returned count is the distance actually moved. A short move means
+        // the endpoint hit the end of the document — the text changed under the
+        // snapshot the lint was computed from — and the resulting range covers
+        // the wrong characters. Fail closed: callers drop the highlight for this
+        // tick, or decline to apply the suggestion.
+        if sub
+            .MoveEndpointByUnit(TextPatternRangeEndpoint_End, TextUnit_Character, end)
+            .ok()?
+            != end
+        {
+            return None;
+        }
+        if sub
+            .MoveEndpointByUnit(TextPatternRangeEndpoint_Start, TextUnit_Character, start)
+            .ok()?
+            != start
+        {
+            return None;
+        }
 
         Some(sub)
     }

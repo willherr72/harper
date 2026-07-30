@@ -19,6 +19,35 @@ pub fn char_to_utf16_offset(text: &str, char_offset: usize) -> i32 {
         .sum::<usize>() as i32
 }
 
+/// Cumulative UTF-16 offsets for every character boundary in `text`.
+///
+/// Entry `i` is the UTF-16 offset of character `i`, and the final entry is the
+/// text's total UTF-16 length. Building this once per read turns per-lint
+/// conversion into an index, which matters on a long document with many lints:
+/// converting each span independently rescans from the start every time.
+pub fn utf16_offset_table(text: &str) -> Vec<i32> {
+    let mut table = Vec::with_capacity(text.chars().count() + 1);
+    let mut offset = 0_i32;
+    table.push(offset);
+    for character in text.chars() {
+        offset += character.len_utf16() as i32;
+        table.push(offset);
+    }
+    table
+}
+
+/// Looks up a char offset in a table from [`utf16_offset_table`].
+///
+/// Offsets past the end saturate at the text's total UTF-16 length, matching
+/// [`char_to_utf16_offset`], because lint spans are computed against a snapshot
+/// that may already be stale.
+pub fn lookup(table: &[i32], char_offset: usize) -> i32 {
+    table
+        .get(char_offset)
+        .copied()
+        .unwrap_or_else(|| table.last().copied().unwrap_or(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,6 +95,29 @@ mod tests {
         let text = "éx";
         assert_eq!(char_to_utf16_offset(text, 1), 1);
         assert_ne!(char_to_utf16_offset(text, 1) as usize, "é".len());
+    }
+
+    #[test]
+    fn table_lookup_matches_scalar_conversion() {
+        // The table is the hot path and the scalar function is the tested one;
+        // they must not drift.
+        for text in [
+            "",
+            "hello world",
+            "a🙂b",
+            "日本語",
+            "éx",
+            "ship it 🚀 teh end",
+        ] {
+            let table = utf16_offset_table(text);
+            for offset in 0..=text.chars().count() + 3 {
+                assert_eq!(
+                    lookup(&table, offset),
+                    char_to_utf16_offset(text, offset),
+                    "text {text:?} offset {offset}"
+                );
+            }
+        }
     }
 
     #[test]
