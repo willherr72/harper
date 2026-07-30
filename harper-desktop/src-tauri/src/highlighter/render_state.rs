@@ -49,6 +49,7 @@ struct CardPalette {
     text_body: egui::Color32,
     text_muted: egui::Color32,
     icon_idle: egui::Color32,
+    icon_hover: egui::Color32,
     icon_hover_bg: egui::Color32,
     code_bg: egui::Color32,
     code_field: egui::Color32,
@@ -65,6 +66,7 @@ fn card_palette() -> CardPalette {
             text_body: hex(0xd6, 0xd0, 0xc4),
             text_muted: hex(0xb0, 0xa9, 0x9c),
             icon_idle: hex(0x9b, 0x94, 0x8a),
+            icon_hover: hex(0xec, 0xe7, 0xdd),
             icon_hover_bg: egui::Color32::from_rgba_unmultiplied(255, 255, 255, 20),
             code_bg: hex(0x3a, 0x35, 0x2b),
             code_field: hex(0x2a, 0x26, 0x1e),
@@ -79,6 +81,10 @@ fn card_palette() -> CardPalette {
             text_body: hex(0x37, 0x41, 0x51),
             text_muted: hex(0x4b, 0x55, 0x63),
             icon_idle: hex(0x6b, 0x72, 0x80),
+            // Pure black, as the light card has always used. Folding this onto
+            // text_strong (0x0a0a0a) would change light rendering on every
+            // platform, which this palette is meant not to do.
+            icon_hover: hex(0x00, 0x00, 0x00),
             icon_hover_bg: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 15),
             code_bg: hex(0xf3, 0xf4, 0xf6),
             code_field: hex(0xf8, 0xfa, 0xfc),
@@ -579,7 +585,7 @@ fn icon_button(ui: &mut egui::Ui, glyph: Glyph, text: &str) -> egui::Response {
         egui::Color32::TRANSPARENT
     };
     let color = if response.hovered() {
-        palette.text_strong
+        palette.icon_hover
     } else {
         palette.icon_idle
     };
