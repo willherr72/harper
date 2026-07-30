@@ -255,7 +255,12 @@ impl Window {
         }
     }
 
-    pub fn render(&mut self, render_state: &mut RenderState) {
+    /// Draws one frame, reporting whether egui asked for another.
+    ///
+    /// egui needs more than one frame in normal operation — after a context is
+    /// created, and while widgets animate — and a renderer that only draws on
+    /// external changes will otherwise leave those frames undrawn.
+    pub fn render(&mut self, render_state: &mut RenderState) -> bool {
         let transform = self.rect_transform();
         let context = self.egui_state.egui_ctx().clone();
         let input = self.egui_state.take_egui_input(&self.inner);
@@ -266,6 +271,11 @@ impl Window {
         self.egui_state
             .handle_platform_output(&self.inner, output.platform_output);
 
+        let wants_another_frame = output
+            .viewport_output
+            .values()
+            .any(|viewport| viewport.repaint_delay.is_zero());
+
         let clipped_primitives = context.tessellate(output.shapes, output.pixels_per_point);
         self.painter.paint_and_update_textures(
             self.viewport_id,
@@ -275,5 +285,7 @@ impl Window {
             &output.textures_delta,
             Vec::new(),
         );
+
+        wants_another_frame
     }
 }
