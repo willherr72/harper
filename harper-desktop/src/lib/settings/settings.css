@@ -1216,3 +1216,12 @@ html.dark .app-result:hover {
 html.dark .app-result.selected {
 	background: rgba(91, 150, 245, 0.16);
 }
+
+html.dark .modal-head,
+html.dark .modal-search {
+	border-bottom-color: rgba(236, 231, 221, 0.1);
+}
+
+html.dark .modal-actions {
+	border-top-color: rgba(236, 231, 221, 0.1);
+}

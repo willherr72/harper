@@ -22,7 +22,7 @@ let menuOpen = false;
 let showIgnoreConfirm = false;
 
 const iconButtonClass =
-	'inline-flex h-7 w-7 items-center justify-center rounded-md border-0 bg-transparent text-stone-600 shadow-none transition-colors duration-150 hover:text-stone-950 disabled:opacity-50';
+	'inline-flex h-7 w-7 items-center justify-center rounded-md border-0 bg-transparent text-stone-600 dark:text-stone-400 shadow-none transition-colors duration-150 hover:text-stone-950 dark:hover:text-stone-100 disabled:opacity-50';
 const menuItemClass =
 	'm-0 flex h-8 w-full items-center border-0 bg-transparent px-3 text-left text-[13px] font-medium text-stone-700 dark:text-stone-300 shadow-none hover:bg-stone-100 dark:hover:bg-stone-700/60 disabled:text-stone-300 dark:disabled:text-stone-600 disabled:hover:bg-transparent';
 const dangerMenuItemClass =
