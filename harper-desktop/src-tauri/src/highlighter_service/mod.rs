@@ -13,11 +13,18 @@ use std::{
 };
 use tokio::sync::Mutex;
 
+/// How long a restarted highlighter must survive before the backoff is
+/// forgiven. Shorter than this and a process that dies a few seconds after
+/// every start would be respawned forever at the shortest delay.
+const HEALTHY_UPTIME: Duration = Duration::from_secs(60);
+
 /// Backoff state for restarting a highlighter that exited unexpectedly.
 #[derive(Default)]
 struct RestartState {
     attempts: u32,
     next_attempt_at: Option<Instant>,
+    /// When this service last started the highlighter itself.
+    last_start: Option<Instant>,
 }
 
 /// Wraps around a [`HighlighterWorker`] and turns it into a service that is easier to manage.
@@ -53,12 +60,24 @@ impl HighlighterService {
     /// user has to notice. Restart attempts back off so a highlighter that
     /// cannot start does not spin.
     pub fn ensure_running(&self) {
-        if !self.should_run.load(Ordering::Relaxed) || self.is_running() {
-            if self.should_run.load(Ordering::Relaxed) {
-                *self
-                    .restart
-                    .lock()
-                    .expect("highlighter restart lock poisoned") = RestartState::default();
+        if !self.should_run.load(Ordering::Relaxed) {
+            return;
+        }
+
+        if self.is_running() {
+            // Forgive the backoff only once the process has stayed up. Clearing
+            // it on a single healthy observation would let a highlighter that
+            // crashes a few seconds after every start respawn indefinitely at
+            // the shortest delay, since each restart is briefly observed alive.
+            let mut restart = self
+                .restart
+                .lock()
+                .expect("highlighter restart lock poisoned");
+            if restart
+                .last_start
+                .is_some_and(|at| at.elapsed() >= HEALTHY_UPTIME)
+            {
+                *restart = RestartState::default();
             }
             return;
         }
@@ -78,8 +97,14 @@ impl HighlighterService {
         }
 
         tracing::warn!("highlighter is not running; restarting it");
-        if let Err(error) = self.start() {
-            tracing::error!("could not restart the highlighter: {error}");
+        match self.start() {
+            Ok(_) => {
+                self.restart
+                    .lock()
+                    .expect("highlighter restart lock poisoned")
+                    .last_start = Some(Instant::now());
+            }
+            Err(error) => tracing::error!("could not restart the highlighter: {error}"),
         }
     }
 
