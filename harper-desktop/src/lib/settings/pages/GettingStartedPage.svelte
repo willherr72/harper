@@ -58,6 +58,7 @@ $: setupSteps = buildSetupSteps(
 	isTextEditEnabled,
 	isLoadingIntegrations,
 	isEnablingTextEdit,
+	demoApp,
 );
 $: setupCompletedCount = setupSteps.filter((step) => step.done).length;
 $: setupAllDone = setupSteps.every((step) => step.done);
@@ -172,7 +173,7 @@ async function requestAccessibilityPermission() {
 
 function accessibilityDescription(status: AccessibilityPermissionStatus | null) {
 	if (status === 'Granted') {
-		return 'Harper can access text through the macOS Accessibility system.';
+		return 'Harper can read text from other apps through the system accessibility APIs.';
 	}
 
 	if (status === 'Unsupported') {
@@ -220,6 +221,7 @@ function buildSetupSteps(
 	currentIsTextEditEnabled: boolean,
 	currentIsLoadingIntegrations: boolean,
 	currentIsEnablingTextEdit: boolean,
+	currentDemoApp: { bundleId: string; name: string },
 ): SetupStep[] {
 	const accessibilityDone = currentAccessibilityStatus === 'Granted';
 	const integrationDone = currentIsTextEditEnabled;
@@ -251,7 +253,7 @@ function buildSetupSteps(
 		{
 			id: 'integration',
 			title: 'Pick an app to test',
-			desc: `Start with ${demoApp.name}, then add more apps from Integrations when you are ready.`,
+			desc: `Start with ${currentDemoApp.name}, then add more apps from Integrations when you are ready.`,
 			required: true,
 			done: integrationDone,
 			locked: !accessibilityDone,
@@ -263,7 +265,7 @@ function buildSetupSteps(
 		{
 			id: 'test-drive',
 			title: 'Take a test drive',
-			desc: `Open ${demoApp.name}, type "its not alot of fun", and watch Harper underline the mistakes.`,
+			desc: `Open ${currentDemoApp.name}, type "its not alot of fun", and watch Harper underline the mistakes.`,
 			required: false,
 			done: testDriveDone,
 			locked: !accessibilityDone || !integrationDone,
@@ -271,7 +273,7 @@ function buildSetupSteps(
 				? 'Launching...'
 				: testDriveDone
 					? 'Run again'
-					: `Launch ${demoApp.name}`,
+					: `Launch ${currentDemoApp.name}`,
 			actionVariant: testDriveDone ? 'default' : 'primary',
 			action: launchTextEditForTestDrive,
 			actionDisabled: isLaunchingTextEdit,
@@ -304,7 +306,7 @@ function buildSetupSteps(
               <div>
                 {#if isCheckingAccessibility}
                   <strong>Checking Accessibility permission</strong>
-                  <p>Harper needs macOS Accessibility access before it can check other apps.</p>
+                  <p>Harper needs accessibility access before it can check other apps.</p>
                 {:else if accessibilityStatus === "Unsupported"}
                   <strong>Accessibility setup is unavailable</strong>
                   <p>Harper Desktop app checking is currently only wired for macOS.</p>

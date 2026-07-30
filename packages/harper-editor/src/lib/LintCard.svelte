@@ -57,7 +57,9 @@ function handleFocus() {
 	bind:this={cardEl}
 	role="group"
 	class={`shrink-0 overflow-hidden rounded-[10px] border-[0.5px] bg-white dark:bg-[#262119] shadow-sm shadow-stone-950/5 transition-[box-shadow,border-color] duration-150 ${
-		active ? lintKindStyle.activeClass : 'border-[rgba(28,26,22,0.14)] dark:border-[rgba(236,231,221,0.14)]'
+		active
+			? `border-[rgba(28,26,22,0.14)] dark:border-[rgba(236,231,221,0.14)] ${lintKindStyle.activeClass}`
+			: 'border-[rgba(28,26,22,0.14)] dark:border-[rgba(236,231,221,0.14)]'
 	}`}
 	on:mouseenter={onActivate}
 >
@@ -102,14 +104,14 @@ function handleFocus() {
 				on:click={handleFocus}
 				aria-label="Focus problem in editor"
 			>
-				<span class="text-stone-500">
+				<span class="text-stone-500 dark:text-stone-400">
 					{snippet.prefixEllipsis ? '...' : ''}{snippet.prefix}
 				</span>
 				<mark
 					class={`rounded-[3px] px-0.5 font-semibold ${lintKindStyle.softClass} ${lintKindStyle.textClass}`}
 					>{snippet.problem}</mark
 				>
-				<span class="text-stone-500">
+				<span class="text-stone-500 dark:text-stone-400">
 					{snippet.suffix}{snippet.suffixEllipsis ? '...' : ''}
 				</span>
 			</button>
@@ -123,7 +125,7 @@ function handleFocus() {
 								class={`${baseSuggestionClass} ${
 									i === 0
 										? `border-transparent ${lintKindStyle.softClass} ${lintKindStyle.textClass} shadow-none`
-										: 'border-[0.5px] border-stone-300 bg-linear-to-b from-white to-stone-50 text-stone-950 shadow-sm shadow-stone-950/5'
+										: 'border-[0.5px] border-stone-300 dark:border-stone-600 bg-linear-to-b from-white to-stone-50 dark:from-stone-700 dark:to-stone-800 text-stone-950 dark:text-stone-100 shadow-sm shadow-stone-950/5'
 								}`}
 								title={`Replace with "${suggestionText(suggestion)}"`}
 								on:click={(event) => {
