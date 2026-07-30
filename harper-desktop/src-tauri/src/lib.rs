@@ -84,9 +84,14 @@ fn platform_broker() -> PlatformBroker {
 
 /// Watches the highlighter and restarts it if it exits on its own.
 ///
+/// Windows-only for now: it was introduced for a crash observed there, and
+/// enabling it elsewhere would change macOS behaviour that this branch is
+/// otherwise careful not to touch.
+///
 /// Highlighting runs in a separate process, so a crash there leaves the rest of
 /// Harper looking healthy while doing nothing — the only outward sign is the
 /// tray icon's status stripe, which is easy to miss for hours.
+#[cfg(target_os = "windows")]
 fn supervise_highlighter_service(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -127,7 +132,7 @@ pub fn run() {
     // offers no transparent alpha mode, and surface-lost errors after
     // display sleep.
     if let Err(error) = tracing_log::LogTracer::init() {
-        eprintln!("Unable to bridge log records into tracing: {error}");
+        tracing::warn!(%error, "unable to bridge log records into tracing");
     }
 
     let args = Args::parse();
@@ -200,6 +205,7 @@ pub fn run_tauri() {
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
 
             set_up_tray_menu(app.handle())?;
+            #[cfg(target_os = "windows")]
             supervise_highlighter_service(app.handle().clone());
             warm_app_search_cache(app.handle().clone());
 
