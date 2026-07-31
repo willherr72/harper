@@ -14,6 +14,7 @@ use super::DisableRule;
 use super::Error;
 use super::IgnoreLint;
 use super::RefreshConfig;
+use super::diagnostics;
 use super::render_state::{HitTarget, RenderState};
 use super::window::Window;
 use crate::os_broker::{LintText, OsBroker};
@@ -150,6 +151,15 @@ struct WindowManagerApp {
     /// Windows only.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     monitor_signature: u64,
+    /// Rate limiter for the overlay's opt-in "why am I not drawing" report.
+    /// Read on Windows only, like the report itself.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    diagnostics: diagnostics::Throttle,
+    /// Rectangles produced by the most recent accessibility read, and frames
+    /// drawn since the last report. Only meaningful when reporting is enabled.
+    last_rect_count: usize,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    renders_since_report: u32,
     error: Option<Error>,
 }
 
@@ -199,6 +209,9 @@ impl WindowManagerApp {
             popup_was_open: false,
             rebuild_at: None,
             monitor_signature: 0,
+            diagnostics: diagnostics::Throttle::new(),
+            last_rect_count: 0,
+            renders_since_report: 0,
             error: None,
         }
     }
@@ -238,6 +251,7 @@ impl WindowManagerApp {
 
         if read_now {
             let rects = self.os_broker.get_boxes(self.lint_text.as_mut());
+            self.last_rect_count = rects.len();
 
             #[cfg(target_os = "windows")]
             {
@@ -283,8 +297,22 @@ impl WindowManagerApp {
                     wants_another_frame |= window.render(&mut self.render_state);
                 }
                 self.scene_dirty = wants_another_frame;
+                self.renders_since_report = self.renders_since_report.saturating_add(1);
             }
             self.popup_was_open = self.render_state.popup_open();
+
+            // Distinguishes "no geometry was produced" from "geometry was
+            // produced but nothing drew it" from "there are no windows to draw
+            // into" — three failures that look the same on screen.
+            if self.diagnostics.ready() {
+                tracing::warn!(
+                    rects = self.last_rect_count,
+                    renders = self.renders_since_report,
+                    windows = self.windows.len(),
+                    "overlay status"
+                );
+                self.renders_since_report = 0;
+            }
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -343,7 +371,14 @@ impl WindowManagerApp {
             self.read_interval = refresh_interval;
         }
 
-        for monitor in monitors {
+        // One snapshot for the whole build. Reading geometry per window instead
+        // lets the displays finish reconfiguring midway through, so the windows
+        // describe a mixture of two layouts — and then recording the layout as
+        // it is *afterwards* tells the invariant everything agrees, leaving
+        // windows that match no real display and no mechanism to notice.
+        let layout = readable_monitor_layout(event_loop);
+
+        for (position, size) in &layout {
             // Each overlay window gets its own egui context on Windows. Sharing
             // one context across the per-monitor windows makes egui's texture
             // deltas race between their independent wgpu renderers: the initial
@@ -357,25 +392,20 @@ impl WindowManagerApp {
             #[cfg(not(target_os = "windows"))]
             let context = self.context.clone();
 
-            let Some((position, size)) = monitor_geometry(&monitor) else {
-                // The handle went invalid while the displays were changing. The
-                // layout check will see the shortfall and rebuild again.
-                continue;
-            };
-
             // Propagated rather than fatal: during a display reconfiguration a
             // failure here is transient and the caller can retry. Only the
             // first-run caller treats it as unrecoverable.
             self.windows.push(pollster::block_on(Window::new(
-                event_loop, position, size, context,
+                event_loop, *position, *size, context,
             ))?);
         }
 
-        // Record the layout these windows were built for, so the invariant does
-        // not immediately declare a change and rebuild them again.
+        // The signature of what was actually built, not of whatever the
+        // displays look like now. If they moved on during the build, the
+        // invariant will see the difference on its next pass and rebuild.
         #[cfg(target_os = "windows")]
         {
-            self.monitor_signature = layout_signature(&readable_monitor_layout(event_loop));
+            self.monitor_signature = layout_signature(&layout);
         }
 
         Ok(())
@@ -490,27 +520,36 @@ fn monitor_geometry(monitor: &MonitorHandle) -> Option<(PhysicalPosition<i32>, P
 }
 
 /// Geometry of every monitor the overlay can currently build a window for.
-#[cfg(target_os = "windows")]
-fn readable_monitor_layout(event_loop: &ActiveEventLoop) -> Vec<(i32, i32, u32, u32)> {
-    let mut layout: Vec<(i32, i32, u32, u32)> = event_loop
+///
+/// This is a snapshot. Callers build from the snapshot rather than re-reading
+/// per window, because a display reconfiguration can complete while windows are
+/// still being created — device creation across a dock transition has been
+/// observed taking the better part of a minute.
+fn readable_monitor_layout(
+    event_loop: &ActiveEventLoop,
+) -> Vec<(PhysicalPosition<i32>, PhysicalSize<u32>)> {
+    event_loop
         .available_monitors()
         .filter_map(|monitor| monitor_geometry(&monitor))
-        .map(|(position, size)| (position.x, position.y, size.width, size.height))
-        .collect();
-    layout.sort_unstable();
-    layout
+        .collect()
 }
 
-/// Order-independent hash of the readable display layout.
+/// Order-independent hash of a display layout.
 ///
 /// Two layouts that would place the overlay windows identically produce the
 /// same value, so this changes exactly when the overlay needs rebuilding.
 #[cfg(target_os = "windows")]
-fn layout_signature(layout: &[(i32, i32, u32, u32)]) -> u64 {
+fn layout_signature(layout: &[(PhysicalPosition<i32>, PhysicalSize<u32>)]) -> u64 {
     use std::hash::{Hash, Hasher};
 
+    let mut sorted: Vec<(i32, i32, u32, u32)> = layout
+        .iter()
+        .map(|(position, size)| (position.x, position.y, size.width, size.height))
+        .collect();
+    sorted.sort_unstable();
+
     let mut hasher = std::hash::DefaultHasher::new();
-    layout.hash(&mut hasher);
+    sorted.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -560,6 +599,7 @@ impl ApplicationHandler for WindowManagerApp {
                 // rebuild loop.
                 let layout = readable_monitor_layout(event_loop);
                 let signature = layout_signature(&layout);
+
                 if self.rebuild_at.is_none()
                     && (signature != self.monitor_signature || self.windows.len() != layout.len())
                 {
