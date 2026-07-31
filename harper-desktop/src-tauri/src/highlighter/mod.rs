@@ -1,3 +1,4 @@
+pub mod diagnostics;
 mod error;
 mod render_state;
 mod window;

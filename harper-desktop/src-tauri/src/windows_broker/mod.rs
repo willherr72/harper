@@ -7,6 +7,7 @@ mod offsets;
 mod rects;
 mod uia;
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -22,8 +23,27 @@ use windows::Win32::UI::Accessibility::{
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 use crate::config::Integration;
+use crate::highlighter::diagnostics;
 use crate::os_broker::{AccessibilityPermissionStatus, AppSearchResult, OsBroker};
 use crate::rect::{ActionableLint, Rect};
+
+thread_local! {
+    /// Rate limiter for the broker's opt-in report.
+    static DIAGNOSTICS: RefCell<diagnostics::Throttle> =
+        const { RefCell::new(diagnostics::Throttle::new()) };
+}
+
+/// Reports why `get_boxes` produced what it did, when reporting is enabled.
+///
+/// Every early return below is a legitimate outcome — most often simply that
+/// the focused app is not one the user enabled — and none of them are
+/// distinguishable from a broken overlay by looking at the screen.
+fn report(outcome: &str) {
+    let ready = DIAGNOSTICS.with(|throttle| throttle.borrow_mut().ready());
+    if ready {
+        tracing::warn!(outcome, "broker status");
+    }
+}
 
 /// Upper bound on text read from a single range.
 const MAX_RANGE_TEXT: i32 = 100_000;
@@ -104,6 +124,7 @@ impl OsBroker for WindowsBroker {
         // every focused TextPattern — terminals and its own settings window
         // included.
         let Some(executable) = foreground::foreground_executable_name() else {
+            report("no foreground window");
             return Vec::new();
         };
         let integration_enabled = match self.integrations.lock() {
@@ -114,11 +135,13 @@ impl OsBroker for WindowsBroker {
             }
         };
         if !integration_enabled {
+            report(&format!("{executable} is not enabled"));
             return Vec::new();
         }
 
         let Some(pattern) = AUTOMATION.with(|a| a.as_ref().and_then(uia::focused_text_pattern))
         else {
+            report(&format!("{executable} exposes no editable text"));
             return Vec::new();
         };
 
@@ -135,6 +158,7 @@ impl OsBroker for WindowsBroker {
         // sub-range of this range, and a lint scrolled out of view yields no
         // rectangles and is skipped.
         let Some(range) = uia::document_range(&pattern) else {
+            report("focused element has no document range");
             return Vec::new();
         };
 
@@ -143,6 +167,7 @@ impl OsBroker for WindowsBroker {
         };
         let text = text.to_string();
         if text.is_empty() {
+            report(&format!("{executable} is empty"));
             return Vec::new();
         }
 
@@ -197,6 +222,12 @@ impl OsBroker for WindowsBroker {
                 ));
             }
         }
+
+        report(&format!(
+            "{executable}: {} chars, {} highlights",
+            text.len(),
+            collected.len()
+        ));
 
         collected
     }
