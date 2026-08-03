@@ -48,6 +48,9 @@ mod mac_broker;
 #[cfg(target_os = "windows")]
 mod windows_broker;
 
+#[cfg(target_os = "windows")]
+mod windows_log;
+
 #[derive(Parser)]
 struct Args {
     #[command(subcommand)]
@@ -117,6 +120,36 @@ fn warm_app_search_cache(app: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Parsed before logging is set up so the log file can be named for the
+    // process writing it — the highlighter is a separate process and would
+    // otherwise interleave with its parent.
+    let args = Args::parse();
+
+    #[cfg(target_os = "windows")]
+    let subscriber = {
+        use tracing_subscriber::fmt::writer::{BoxMakeWriter, MakeWriterExt as _};
+
+        let role = match args.command {
+            Some(Command::Highlighter { .. }) => windows_log::Role::Highlighter,
+            None => windows_log::Role::Main,
+        };
+
+        // Tee rather than replace: a developer running with a console still
+        // sees everything, and the redirect the smoke test uses keeps working.
+        // Boxed because the two arms are otherwise distinct writer types.
+        let writer = match windows_log::appender(role) {
+            Some(file) => BoxMakeWriter::new(stderr.and(file)),
+            None => BoxMakeWriter::new(stderr),
+        };
+
+        FmtSubscriber::builder()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_max_level(Level::WARN)
+            .finish()
+    };
+
+    #[cfg(not(target_os = "windows"))]
     let subscriber = FmtSubscriber::builder()
         .map_writer(move |_| stderr)
         .with_ansi(false)
@@ -125,6 +158,11 @@ pub fn run() {
 
     tracing::subscriber::set_global_default(subscriber)
         .expect("Unable to set up tracing subscriber.");
+
+    // After the subscriber, so the hook has somewhere to write. Release builds
+    // abort on panic, so this is the only record a crash leaves behind.
+    #[cfg(target_os = "windows")]
+    windows_log::install_panic_hook();
 
     // Route `log`-crate records (wgpu, egui-wgpu, winit) into tracing.
     // Without this bridge their warnings are silently dropped — which has
@@ -135,7 +173,13 @@ pub fn run() {
         tracing::warn!(%error, "unable to bridge log records into tracing");
     }
 
-    let args = Args::parse();
+    // Recorded so a support request can say where the evidence is without the
+    // user having to know the convention. Harmless on a console build, and the
+    // only signpost on an installed one.
+    #[cfg(target_os = "windows")]
+    if let Some(directory) = windows_log::directory() {
+        tracing::warn!("logging to {}", directory.display());
+    }
 
     match args.command {
         Some(Command::Highlighter { no_parent }) => run_highlighter(!no_parent),
