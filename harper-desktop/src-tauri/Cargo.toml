@@ -67,6 +67,9 @@ accessibility-sys = "0.2.0"
 core-graphics = "0.25.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# Release builds have no console (`windows_subsystem = "windows"`), so
+# diagnostics need a file to land in. See `src/windows_log.rs`.
+tracing-appender = "0.2.3"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
