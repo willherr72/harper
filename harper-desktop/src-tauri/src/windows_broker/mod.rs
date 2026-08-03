@@ -6,6 +6,7 @@ mod foreground;
 mod offsets;
 mod rects;
 mod uia;
+mod window_stability;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -100,11 +101,17 @@ pub struct WindowsBroker {
     /// highlighter's config refresh writes into this same shared Vec, so
     /// settings toggles take effect without restarting the broker.
     integrations: Arc<StdMutex<Vec<Integration>>>,
+    /// Position of the foreground window last time it was looked at, so
+    /// highlights can be withheld while it is being dragged.
+    window_movement: window_stability::WindowMovement,
 }
 
 impl WindowsBroker {
     pub fn new(integrations: Arc<StdMutex<Vec<Integration>>>) -> Self {
-        Self { integrations }
+        Self {
+            integrations,
+            window_movement: window_stability::WindowMovement::default(),
+        }
     }
 }
 
@@ -136,6 +143,17 @@ impl OsBroker for WindowsBroker {
         };
         if !integration_enabled {
             report(&format!("{executable} is not enabled"));
+            return Vec::new();
+        }
+
+        // Rectangles are read at one instant and drawn at another. While the
+        // window is in motion those disagree and the underlines slide along
+        // behind their text, so withhold them until it settles — the same
+        // behaviour, and the same 150 ms, as the macOS broker. Placed before
+        // the UIA work because geometry gathered mid-drag is stale by the time
+        // it is painted, so reading it is wasted effort as well as wrong.
+        if self.window_movement.is_moving() {
+            report(&format!("{executable} window is moving"));
             return Vec::new();
         }
 
